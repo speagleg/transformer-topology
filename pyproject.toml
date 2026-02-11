@@ -1,0 +1,40 @@
+[project]
+name = "transformer-topology"
+version = "0.1.0"
+description = "Topology-aware transformers integrated with GNN executive for structured reasoning"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.0",
+    "torch-geometric>=2.5",
+    "scipy>=1.12",
+    "networkx>=3.2",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+]
+spectral = [
+    "torchdiffeq>=0.2",
+]
+homology = [
+    "gudhi>=3.9",
+]
+tracking = [
+    "wandb>=0.16",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
