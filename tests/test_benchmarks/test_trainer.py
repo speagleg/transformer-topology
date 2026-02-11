@@ -16,7 +16,7 @@ class TestMultiHopModel:
         ds = MultiHopDataset(num_samples=1, min_hops=3, max_hops=3, num_distractors=5, embedding_dim=32)
         cc, query, target, answer = ds[0]
         logits = model(cc, query, target)
-        assert logits.shape == (10,)
+        assert logits.shape == (11,)  # max_hops + 1 classes (0 through max_hops)
 
     def test_gradient_flow(self):
         model = MultiHopReasoningModel(

@@ -1,0 +1,26 @@
+model:
+  embedding_dim: 64
+  num_gnn_layers: 4
+  num_tat_layers: 4
+  num_spatial_heads: 4
+  num_spectral_heads: 4
+  tat_ff_dim: 256
+  dropout: 0.1
+
+training:
+  learning_rate: 0.001
+  batch_size: 32
+  max_epochs: 20
+  patience: 7
+
+benchmark:
+  min_hops: 2
+  max_hops: 10
+  num_distractors: 20
+  num_train: 500
+  num_val: 100
+  num_test: 200
+
+reasoning_loop:
+  max_iterations: 3
+  convergence_threshold: 0.01

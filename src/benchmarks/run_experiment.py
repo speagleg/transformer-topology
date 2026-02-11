@@ -117,4 +117,6 @@ def run_experiment(config_path: str = "config/default.yaml"):
 
 
 if __name__ == "__main__":
-    run_experiment()
+    import sys
+    config = sys.argv[1] if len(sys.argv) > 1 else "config/default.yaml"
+    run_experiment(config)

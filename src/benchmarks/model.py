@@ -22,7 +22,7 @@ class MultiHopReasoningModel(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(3 * embedding_dim, 2 * embedding_dim),
             nn.ReLU(),
-            nn.Linear(2 * embedding_dim, max_hops),
+            nn.Linear(2 * embedding_dim, max_hops + 1),
         )
 
     def forward(self, cc: CellComplex, query_node: int, target_node: int) -> torch.Tensor:
