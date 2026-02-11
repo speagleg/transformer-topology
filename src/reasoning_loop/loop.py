@@ -75,8 +75,10 @@ class ReasoningLoop(nn.Module):
             # Step 1: GNN Executive
             gnn_out, _ = self.gnn_executive(cc)
 
-            # Step 2: Update cell complex for TAT
-            cc.set_embeddings(0, gnn_out.detach() if not self.training else gnn_out)
+            # Step 2: Update cell complex for TAT (always detach to avoid
+            # retaining graph across samples/epochs — gradients flow through
+            # the explicit gnn_out → blend path, not through cc storage)
+            cc.set_embeddings(0, gnn_out.detach())
 
             # Step 3: Topology-Aware Transformer
             tat_out = self.tat(cc)
@@ -86,7 +88,7 @@ class ReasoningLoop(nn.Module):
             current_embeddings = self.norm(blended + prev_embeddings)
 
             # Step 5: Write blended embeddings back to cell complex
-            cc.set_embeddings(0, current_embeddings.detach() if not self.training else current_embeddings)
+            cc.set_embeddings(0, current_embeddings.detach())
 
             # Step 6: Convergence check
             delta = (current_embeddings - prev_embeddings).norm()
