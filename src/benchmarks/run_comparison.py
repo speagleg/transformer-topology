@@ -17,6 +17,8 @@ from src.reasoning_loop.executive_loop import ExecutiveReasoningLoop
 from src.benchmarks.multi_hop import MultiHopDataset
 from src.benchmarks.temporal_tasks import TemporalDataset
 from src.spectral.decomposition import hodge_decomposition
+from src.spectral.persistence import vectorize_persistence, compute_persistence_diagram
+from src.benchmarks.phase3_model import PERSISTENCE_FEATURES
 
 
 class SymmetricMultiHopModel(nn.Module):
@@ -59,13 +61,13 @@ class SymmetricMultiHopModel(nn.Module):
 
 
 class HierarchicalMultiHopModel(nn.Module):
-    """Phase 3 architecture: hierarchical GNN -> TAT with control signals + wave dynamics."""
+    """Phase 3 architecture: hierarchical GNN -> TAT with control signals + wave dynamics + Phase 2."""
 
     def __init__(self, embedding_dim, gnn_hidden, gnn_spatial_layers,
                  gnn_spectral_layers, max_freqs, tat_layers,
                  tat_spatial_heads, tat_spectral_heads, tat_ff_dim,
                  max_classes, max_iterations, convergence_threshold,
-                 use_wave_dynamics=True):
+                 use_wave_dynamics=True, use_higher_order=True):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.executive_loop = ExecutiveReasoningLoop(
@@ -78,10 +80,11 @@ class HierarchicalMultiHopModel(nn.Module):
             tat_ff_dim=tat_ff_dim, max_iterations=max_iterations,
             convergence_threshold=convergence_threshold,
             use_wave_dynamics=use_wave_dynamics,
+            use_higher_order=use_higher_order,
         )
 
-        # Same classifier dimensions as symmetric + hodge(3) + wave_energy(1)
-        classifier_input_dim = 3 * embedding_dim + 3 + 1
+        # hodge(3) + wave_energy(1) + persistence(32)
+        classifier_input_dim = 3 * embedding_dim + 3 + 1 + PERSISTENCE_FEATURES
         self.classifier = nn.Sequential(
             nn.Linear(classifier_input_dim, 4 * embedding_dim),
             nn.LayerNorm(4 * embedding_dim),
@@ -119,6 +122,13 @@ class HierarchicalMultiHopModel(nn.Module):
         energy = dt.pow(2) + wd.pow(2)
         return energy.unsqueeze(0)
 
+    def _compute_persistence_features(self, cc):
+        try:
+            diagrams = compute_persistence_diagram(cc, max_dimension=1)
+            return vectorize_persistence(diagrams, num_features=16)
+        except (RuntimeError, ValueError):
+            return torch.zeros(PERSISTENCE_FEATURES)
+
     def forward(self, cc, query_node, target_node):
         output, num_iters, diagnostics = self.executive_loop(cc)
         query_emb = output[query_node]
@@ -126,7 +136,9 @@ class HierarchicalMultiHopModel(nn.Module):
         diff_emb = query_emb - target_emb
         hodge_features = self._compute_hodge_features(cc)
         wave_energy = self._compute_wave_energy(diagnostics)
-        combined = torch.cat([query_emb, target_emb, diff_emb, hodge_features, wave_energy])
+        persistence_features = self._compute_persistence_features(cc)
+        combined = torch.cat([query_emb, target_emb, diff_emb,
+                              hodge_features, wave_energy, persistence_features])
         return self.classifier(combined)
 
 

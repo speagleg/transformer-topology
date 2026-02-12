@@ -38,7 +38,8 @@ class ExecutiveReasoningLoop(nn.Module):
                  gnn_spectral_layers: int, max_freqs: int, tat_layers: int,
                  tat_spatial_heads: int, tat_spectral_heads: int, tat_ff_dim: int,
                  max_iterations: int = 5, convergence_threshold: float = 0.1,
-                 use_wave_dynamics: bool = True):
+                 use_wave_dynamics: bool = True,
+                 use_higher_order: bool = False):
         super().__init__()
         self.max_iterations = max_iterations
         self.convergence_threshold = convergence_threshold
@@ -51,6 +52,7 @@ class ExecutiveReasoningLoop(nn.Module):
             num_spectral_layers=gnn_spectral_layers,
             max_freqs=max_freqs,
             produce_control_signals=True,
+            use_higher_order=use_higher_order,
         )
 
         self.tat = TopologyAwareTransformer(

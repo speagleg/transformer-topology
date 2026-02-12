@@ -5,6 +5,10 @@ import torch.nn as nn
 from src.cell_complex.cell_complex import CellComplex
 from src.reasoning_loop.executive_loop import ExecutiveReasoningLoop
 from src.spectral.decomposition import hodge_decomposition
+from src.spectral.persistence import vectorize_persistence, compute_persistence_diagram
+
+# persistence: 2 dimensions (H0, H1) * 16 features each = 32
+PERSISTENCE_FEATURES = 32
 
 
 class TemporalReasoningModel(nn.Module):
@@ -12,8 +16,10 @@ class TemporalReasoningModel(nn.Module):
 
     Extends the Phase 2 model with:
     - ExecutiveReasoningLoop (hierarchical GNN->TAT with control signals)
+    - Higher-order GNN message passing over 2-cells
     - Wave dynamics for temporal propagation
     - Wave energy features derived from control signal diagnostics
+    - Persistence homology features (H0 + H1 diagrams)
     - Deeper classifier head with LayerNorm/GELU/Dropout
     """
 
@@ -22,7 +28,8 @@ class TemporalReasoningModel(nn.Module):
                  tat_spatial_heads: int, tat_spectral_heads: int, tat_ff_dim: int,
                  max_classes: int, max_iterations: int = 7,
                  convergence_threshold: float = 0.1,
-                 use_wave_dynamics: bool = True):
+                 use_wave_dynamics: bool = True,
+                 use_higher_order: bool = True):
         super().__init__()
         self.embedding_dim = embedding_dim
 
@@ -36,10 +43,11 @@ class TemporalReasoningModel(nn.Module):
             tat_ff_dim=tat_ff_dim, max_iterations=max_iterations,
             convergence_threshold=convergence_threshold,
             use_wave_dynamics=use_wave_dynamics,
+            use_higher_order=use_higher_order,
         )
 
-        # Classifier input: query_emb + target_emb + diff_emb + hodge (3) + wave_energy (1)
-        classifier_input_dim = 3 * embedding_dim + 3 + 1
+        # Classifier input: query_emb + target_emb + diff_emb + hodge(3) + wave_energy(1) + persistence(32)
+        classifier_input_dim = 3 * embedding_dim + 3 + 1 + PERSISTENCE_FEATURES
         self.classifier = nn.Sequential(
             nn.Linear(classifier_input_dim, 4 * embedding_dim),
             nn.LayerNorm(4 * embedding_dim),
@@ -89,6 +97,18 @@ class TemporalReasoningModel(nn.Module):
         energy = dt.pow(2) + wd.pow(2)
         return energy.unsqueeze(0)
 
+    def _compute_persistence_features(self, cc: CellComplex) -> torch.Tensor:
+        """Compute persistence homology features (H0 and H1 diagrams).
+
+        Returns a fixed-size vector of topological invariants capturing
+        connected components (H0) and cycles (H1).
+        """
+        try:
+            diagrams = compute_persistence_diagram(cc, max_dimension=1)
+            return vectorize_persistence(diagrams, num_features=16)
+        except (RuntimeError, ValueError):
+            return torch.zeros(PERSISTENCE_FEATURES)
+
     def forward(self, cc: CellComplex, query_node: int, target_node: int) -> torch.Tensor:
         output, num_iters, diagnostics = self.executive_loop(cc)
         query_emb = output[query_node]
@@ -97,7 +117,9 @@ class TemporalReasoningModel(nn.Module):
 
         hodge_features = self._compute_hodge_features(cc)
         wave_energy = self._compute_wave_energy(diagnostics)
+        persistence_features = self._compute_persistence_features(cc)
 
-        combined = torch.cat([query_emb, target_emb, diff_emb, hodge_features, wave_energy])
+        combined = torch.cat([query_emb, target_emb, diff_emb,
+                              hodge_features, wave_energy, persistence_features])
         logits = self.classifier(combined)
         return logits

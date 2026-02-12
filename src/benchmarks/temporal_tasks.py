@@ -12,6 +12,7 @@ import random
 import torch
 
 from src.cell_complex.cell_complex import CellComplex
+from src.benchmarks.topological_tasks import auto_fill_triangles
 
 
 def _dijkstra(
@@ -117,6 +118,9 @@ def generate_propagation_delay_task(
     else:
         answer = max_delay - 1
 
+    # Fill 2-cells from detected triangles for higher-order processing
+    auto_fill_triangles(cc)
+
     return cc, source, target, answer
 
 
@@ -171,6 +175,9 @@ def generate_blocking_task(
     else:
         answer = max_delay - 1
 
+    # Fill 2-cells from detected triangles for higher-order processing
+    auto_fill_triangles(cc)
+
     return cc, source, target, answer
 
 
@@ -224,6 +231,9 @@ def generate_interference_task(
     else:
         diff = abs(dist1[target] - dist2[target])
         answer = 1 if diff % 2 == 0 else 0
+
+    # Fill 2-cells from detected triangles for higher-order processing
+    auto_fill_triangles(cc)
 
     return cc, source1, target, answer
 

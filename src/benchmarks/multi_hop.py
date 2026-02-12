@@ -1,6 +1,7 @@
 import torch
 import random
 from src.cell_complex.cell_complex import CellComplex
+from src.benchmarks.topological_tasks import auto_fill_triangles
 
 
 def generate_chain_task(num_hops: int, num_distractors: int, embedding_dim: int
@@ -42,6 +43,7 @@ def generate_chain_task(num_hops: int, num_distractors: int, embedding_dim: int
             emb = torch.randn(embedding_dim)
             cc.add_1_cell(d, t, emb, "distractor_edge")
 
+    auto_fill_triangles(cc)
     return cc, chain_nodes[0], chain_nodes[-1], num_hops
 
 
@@ -80,6 +82,7 @@ def generate_tree_task(depth: int, branching: int, num_distractors: int, embeddi
         all_nodes.append(d)
 
     target = random.choice(leaves)
+    auto_fill_triangles(cc)
     return cc, root, target, depth
 
 
