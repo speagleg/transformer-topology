@@ -1,0 +1,30 @@
+model:
+  embedding_dim: 64
+  gnn_hidden: 128
+  gnn_spatial_layers: 4
+  gnn_spectral_layers: 4
+  max_freqs: 16
+  tat_layers: 4
+  tat_spatial_heads: 4
+  tat_spectral_heads: 4
+  tat_ff_dim: 256
+  max_iterations: 5
+  convergence_threshold: 0.1
+
+training:
+  learning_rate: 0.001
+  epochs: 15
+  patience: 7
+  max_norm: 5.0
+  accumulation_steps: 4
+
+data:
+  # Multi-hop task settings
+  min_hops: 2
+  max_hops: 10
+  num_distractors: 20
+  num_train: 200
+  num_test: 100
+  # Temporal task settings
+  n_nodes: 10
+  max_delay: 10
