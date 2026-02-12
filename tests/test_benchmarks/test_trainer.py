@@ -18,6 +18,16 @@ class TestMultiHopModel:
         logits = model(cc, query, target)
         assert logits.shape == (11,)  # max_hops + 1 classes (0 through max_hops)
 
+    def test_classifier_depth(self):
+        model = MultiHopReasoningModel(
+            embedding_dim=32, gnn_hidden=64, gnn_spatial_layers=1,
+            gnn_spectral_layers=1, max_freqs=4, tat_layers=1,
+            tat_spatial_heads=2, tat_spectral_heads=2, tat_ff_dim=64,
+            max_hops=10, max_iterations=1,
+        )
+        linear_layers = [m for m in model.classifier if isinstance(m, torch.nn.Linear)]
+        assert len(linear_layers) == 3, f"Expected 3 linear layers, got {len(linear_layers)}"
+
     def test_gradient_flow(self):
         model = MultiHopReasoningModel(
             embedding_dim=32, gnn_hidden=64, gnn_spatial_layers=1,

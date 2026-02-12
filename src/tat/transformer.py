@@ -73,7 +73,7 @@ class TopologyAwareTransformer(nn.Module):
 
     Extracts embeddings and topology from a CellComplex, computes spectral
     decomposition, then passes through a stack of dual spatial/spectral
-    attention blocks.
+    attention blocks. Optionally adds topological positional encodings.
 
     Args:
         embedding_dim: Embedding dimension.
@@ -83,18 +83,30 @@ class TopologyAwareTransformer(nn.Module):
         ff_dim: Hidden dimension of the feed-forward network in each block.
         num_freqs: Number of Laplacian eigenfrequencies for spectral attention.
         dropout: Dropout probability.
+        use_topological_pe: Whether to use topological positional encodings.
     """
 
     def __init__(self, embedding_dim: int, num_layers: int, num_spatial_heads: int,
-                 num_spectral_heads: int, ff_dim: int, num_freqs: int, dropout: float = 0.1):
+                 num_spectral_heads: int, ff_dim: int, num_freqs: int, dropout: float = 0.1,
+                 use_topological_pe: bool = False):
         super().__init__()
         self.num_freqs = num_freqs
+        self.use_topological_pe = use_topological_pe
         self.blocks = nn.ModuleList([
             TATBlock(embed_dim=embedding_dim, num_spatial_heads=num_spatial_heads,
                      num_spectral_heads=num_spectral_heads, ff_dim=ff_dim,
                      num_freqs=num_freqs, dropout=dropout)
             for _ in range(num_layers)
         ])
+
+        if use_topological_pe:
+            from src.spectral.positional_encoding import TopologicalPositionalEncoding
+            self.topo_pe = TopologicalPositionalEncoding(
+                embedding_dim=embedding_dim,
+                num_eigenvectors=min(num_freqs, 8),
+                num_persistence_features=8,
+                max_2_cells=32,
+            )
 
     def forward(self, cc: CellComplex) -> torch.Tensor:
         """Forward pass through the full transformer.
@@ -113,6 +125,11 @@ class TopologyAwareTransformer(nn.Module):
         adjacency = adjacency + torch.eye(adjacency.shape[0])
         adjacency = (adjacency > 0).float()
         eigenvalues, eigenvectors = spectral_decomposition(cc, dim=0, k=self.num_freqs)
+
+        if self.use_topological_pe:
+            topo_pe = self.topo_pe(cc)
+            x = x + topo_pe
+
         for block in self.blocks:
             x = block(x, adjacency, eigenvalues, eigenvectors)
         return x

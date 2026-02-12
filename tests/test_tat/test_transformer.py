@@ -52,3 +52,38 @@ class TestTopologyAwareTransformer:
         )
         total_params = sum(p.numel() for p in tat.parameters())
         assert 1_000_000 < total_params < 50_000_000
+
+    def test_topological_pe_different_output(self):
+        cc = make_chain(dim=32, length=5)
+        tat_no_pe = TopologyAwareTransformer(
+            embedding_dim=32, num_layers=1, num_spatial_heads=2,
+            num_spectral_heads=2, ff_dim=64, num_freqs=4,
+            use_topological_pe=False,
+        )
+        tat_with_pe = TopologyAwareTransformer(
+            embedding_dim=32, num_layers=1, num_spatial_heads=2,
+            num_spectral_heads=2, ff_dim=64, num_freqs=4,
+            use_topological_pe=True,
+        )
+        # Copy shared weights
+        tat_with_pe.blocks.load_state_dict(tat_no_pe.blocks.state_dict())
+        out_no_pe = tat_no_pe(cc)
+        out_with_pe = tat_with_pe(cc)
+        # Outputs should differ due to PE addition
+        assert not torch.allclose(out_no_pe, out_with_pe, atol=1e-4)
+
+    def test_topological_pe_gradient_flow(self):
+        cc = make_chain(dim=32, length=5)
+        tat = TopologyAwareTransformer(
+            embedding_dim=32, num_layers=1, num_spatial_heads=2,
+            num_spectral_heads=2, ff_dim=64, num_freqs=4,
+            use_topological_pe=True,
+        )
+        out = tat(cc)
+        loss = out.sum()
+        loss.backward()
+        # Check that topo_pe params have gradients computed (not None)
+        pe_params = [(n, p) for n, p in tat.named_parameters() if 'topo_pe' in n]
+        assert len(pe_params) > 0, "No topo_pe parameters found"
+        pe_with_grad = sum(1 for n, p in pe_params if p.grad is not None)
+        assert pe_with_grad > 0, "No topo_pe parameters received gradients"

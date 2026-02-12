@@ -53,6 +53,7 @@ def run_experiment(config_path: str = "config/default.yaml"):
         tat_ff_dim=mc["tat_ff_dim"],
         max_hops=bc["max_hops"],
         max_iterations=rc["max_iterations"],
+        convergence_threshold=rc.get("convergence_threshold", 0.1),
     )
 
     total_params = sum(p.numel() for p in model.parameters())

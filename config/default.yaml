@@ -23,5 +23,5 @@ benchmark:
   num_test: 1000
 
 reasoning_loop:
-  max_iterations: 5
-  convergence_threshold: 0.01
+  max_iterations: 7
+  convergence_threshold: 0.1

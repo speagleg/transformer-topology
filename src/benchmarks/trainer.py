@@ -5,18 +5,22 @@ from src.benchmarks.multi_hop import MultiHopDataset
 
 
 def train_epoch(model: MultiHopReasoningModel, dataset: MultiHopDataset,
-                optimizer: torch.optim.Optimizer) -> float:
+                optimizer: torch.optim.Optimizer, max_norm: float = 5.0,
+                accumulation_steps: int = 4) -> float:
     model.train()
     total_loss = 0.0
+    optimizer.zero_grad()
     for i in range(len(dataset)):
         cc, query, target, answer = dataset[i]
-        optimizer.zero_grad()
         logits = model(cc, query, target)
         loss = nn.functional.cross_entropy(logits.unsqueeze(0), torch.tensor([answer]))
+        loss = loss / accumulation_steps
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-        total_loss += loss.item()
+        total_loss += loss.item() * accumulation_steps
+        if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataset):
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+            optimizer.step()
+            optimizer.zero_grad()
     return total_loss / len(dataset)
 
 

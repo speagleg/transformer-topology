@@ -1,7 +1,7 @@
 import torch
 import pytest
 from src.cell_complex.cell_complex import CellComplex
-from src.spectral.laplacian import hodge_laplacian_0, hodge_laplacian_1
+from src.spectral.laplacian import hodge_laplacian_0, hodge_laplacian_1, hodge_laplacian_2
 
 
 def make_triangle_complex(dim=4):
@@ -68,4 +68,41 @@ class TestHodgeLaplacian1:
         cc = make_triangle_complex()
         L1 = hodge_laplacian_1(cc)
         eigenvalues = torch.linalg.eigvalsh(L1)
+        assert (eigenvalues >= -1e-6).all()
+
+    def test_l1_changes_with_2_cells(self):
+        """L1 should change when 2-cells are added (B2 @ B2^T term)."""
+        cc = make_triangle_complex()
+        L1_without = hodge_laplacian_1(cc).clone()
+        edges = list(range(cc.num_cells(1)))
+        cc.add_2_cell(edges, torch.randn(4))
+        L1_with = hodge_laplacian_1(cc)
+        # The B2 @ B2^T term adds to L1
+        assert not torch.allclose(L1_without, L1_with)
+
+    def test_l1_with_face_symmetric_psd(self):
+        cc = make_triangle_complex()
+        edges = list(range(cc.num_cells(1)))
+        cc.add_2_cell(edges, torch.randn(4))
+        L1 = hodge_laplacian_1(cc)
+        assert torch.allclose(L1, L1.T)
+        eigenvalues = torch.linalg.eigvalsh(L1)
+        assert (eigenvalues >= -1e-6).all()
+
+
+class TestHodgeLaplacian2:
+    def test_shape(self):
+        cc = make_triangle_complex()
+        edges = list(range(cc.num_cells(1)))
+        cc.add_2_cell(edges, torch.randn(4))
+        L2 = hodge_laplacian_2(cc)
+        assert L2.shape == (1, 1)
+
+    def test_symmetric_psd(self):
+        cc = make_triangle_complex()
+        edges = list(range(cc.num_cells(1)))
+        cc.add_2_cell(edges, torch.randn(4))
+        L2 = hodge_laplacian_2(cc)
+        assert torch.allclose(L2, L2.T)
+        eigenvalues = torch.linalg.eigvalsh(L2)
         assert (eigenvalues >= -1e-6).all()

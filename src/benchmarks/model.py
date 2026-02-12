@@ -8,7 +8,8 @@ class MultiHopReasoningModel(nn.Module):
     def __init__(self, embedding_dim: int, gnn_hidden: int, gnn_spatial_layers: int,
                  gnn_spectral_layers: int, max_freqs: int, tat_layers: int,
                  tat_spatial_heads: int, tat_spectral_heads: int, tat_ff_dim: int,
-                 max_hops: int, max_iterations: int = 3):
+                 max_hops: int, max_iterations: int = 3,
+                 convergence_threshold: float = 0.01):
         super().__init__()
         self.reasoning_loop = ReasoningLoop(
             embedding_dim=embedding_dim, gnn_hidden=gnn_hidden,
@@ -18,10 +19,17 @@ class MultiHopReasoningModel(nn.Module):
             tat_spatial_heads=tat_spatial_heads,
             tat_spectral_heads=tat_spectral_heads,
             tat_ff_dim=tat_ff_dim, max_iterations=max_iterations,
+            convergence_threshold=convergence_threshold,
         )
         self.classifier = nn.Sequential(
-            nn.Linear(3 * embedding_dim, 2 * embedding_dim),
-            nn.ReLU(),
+            nn.Linear(3 * embedding_dim, 4 * embedding_dim),
+            nn.LayerNorm(4 * embedding_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(4 * embedding_dim, 2 * embedding_dim),
+            nn.LayerNorm(2 * embedding_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
             nn.Linear(2 * embedding_dim, max_hops + 1),
         )
 
