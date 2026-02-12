@@ -32,13 +32,17 @@ class TopologicalSpatialAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, x: torch.Tensor, adjacency: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, adjacency: torch.Tensor,
+                spatial_focus: torch.Tensor | None = None) -> torch.Tensor:
         """Forward pass with adjacency-masked attention.
 
         Args:
             x: Node features of shape ``(N, embed_dim)``.
             adjacency: Binary adjacency matrix of shape ``(N, N)``.
                 Non-zero entries indicate topologically connected cells.
+            spatial_focus: Optional tensor of shape ``(N,)`` with values in
+                [0, 1] used as an additive bias on attention scores to steer
+                focus toward specific nodes.  When ``None``, no bias is added.
 
         Returns:
             Output features of shape ``(N, embed_dim)`` after residual
@@ -59,6 +63,13 @@ class TopologicalSpatialAttention(nn.Module):
         # Apply adjacency mask: block attention to non-adjacent cells
         mask = adjacency.unsqueeze(0).expand(self.num_heads, -1, -1)
         scores = scores.masked_fill(mask == 0, float("-inf"))
+
+        # Apply spatial focus bias from GNN executive control signal
+        if spatial_focus is not None:
+            # spatial_focus: (N,) → broadcast to (num_heads, N, N)
+            # Bias the key dimension so attended-to nodes with higher focus
+            # receive proportionally higher attention scores.
+            scores = scores + spatial_focus.unsqueeze(0).unsqueeze(0)
 
         attn_weights = torch.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)

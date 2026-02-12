@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 from src.cell_complex.cell_complex import CellComplex
 from src.tat.spatial_attention import TopologicalSpatialAttention
 from src.tat.spectral_attention import TopologicalSpectralAttention
 from src.spectral.decomposition import spectral_decomposition
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.gnn_executive.control_head import ControlSignal
 
 
 class TATBlock(nn.Module):
@@ -47,7 +53,8 @@ class TATBlock(nn.Module):
         self.ff_norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x: torch.Tensor, adjacency: torch.Tensor,
-                eigenvalues: torch.Tensor, eigenvectors: torch.Tensor) -> torch.Tensor:
+                eigenvalues: torch.Tensor, eigenvectors: torch.Tensor,
+                control_signal: ControlSignal | None = None) -> torch.Tensor:
         """Forward pass through the dual-attention block.
 
         Args:
@@ -55,12 +62,19 @@ class TATBlock(nn.Module):
             adjacency: Binary adjacency matrix of shape (N, N).
             eigenvalues: Laplacian eigenvalues of shape (num_freqs,).
             eigenvectors: Laplacian eigenvectors of shape (N, num_freqs).
+            control_signal: Optional :class:`ControlSignal` from the GNN
+                executive.  When provided, ``spatial_focus`` biases spatial
+                attention and ``frequency_gate`` gates spectral attention.
 
         Returns:
             Output tensor of shape (N, embed_dim).
         """
-        spatial_out = self.spatial_attn(x, adjacency=adjacency)
-        spectral_out = self.spectral_attn(x, eigenvalues=eigenvalues, eigenvectors=eigenvectors)
+        spatial_focus = control_signal.spatial_focus if control_signal is not None else None
+        frequency_gate = control_signal.frequency_gate if control_signal is not None else None
+
+        spatial_out = self.spatial_attn(x, adjacency=adjacency, spatial_focus=spatial_focus)
+        spectral_out = self.spectral_attn(x, eigenvalues=eigenvalues, eigenvectors=eigenvectors,
+                                          frequency_gate=frequency_gate)
         g = self.gate(torch.cat([spatial_out, spectral_out], dim=-1))
         x = g * spatial_out + (1 - g) * spectral_out
         x = x + self.ff(x)
@@ -108,7 +122,8 @@ class TopologyAwareTransformer(nn.Module):
                 max_2_cells=32,
             )
 
-    def forward(self, cc: CellComplex) -> torch.Tensor:
+    def forward(self, cc: CellComplex,
+                control_signal: ControlSignal | None = None) -> torch.Tensor:
         """Forward pass through the full transformer.
 
         Extracts node embeddings and adjacency from the cell complex,
@@ -116,6 +131,9 @@ class TopologyAwareTransformer(nn.Module):
 
         Args:
             cc: Input CellComplex with 0-cells and 1-cells.
+            control_signal: Optional :class:`ControlSignal` from the GNN
+                executive.  Passed through to each :class:`TATBlock` to
+                modulate spatial and spectral attention.
 
         Returns:
             Output node features of shape (N, embedding_dim).
@@ -131,5 +149,6 @@ class TopologyAwareTransformer(nn.Module):
             x = x + topo_pe
 
         for block in self.blocks:
-            x = block(x, adjacency, eigenvalues, eigenvectors)
+            x = block(x, adjacency, eigenvalues, eigenvectors,
+                      control_signal=control_signal)
         return x

@@ -28,13 +28,17 @@ class TopologicalSpectralAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, x: torch.Tensor, eigenvalues: torch.Tensor, eigenvectors: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, eigenvalues: torch.Tensor, eigenvectors: torch.Tensor,
+                frequency_gate: torch.Tensor | None = None) -> torch.Tensor:
         """Spectral attention forward pass.
 
         Args:
             x: Node features of shape (n, embed_dim).
             eigenvalues: Laplacian eigenvalues of shape (num_freqs,) or larger.
             eigenvectors: Laplacian eigenvectors of shape (n, num_freqs) or larger.
+            frequency_gate: Optional tensor of shape (num_freqs,) with values
+                in [0, 1] used to selectively attenuate spectral bands after
+                filtering.  When ``None``, no gating is applied.
 
         Returns:
             Output tensor of shape (n, embed_dim).
@@ -55,6 +59,14 @@ class TopologicalSpectralAttention(nn.Module):
         # Attention in spectral domain per frequency
         scores = torch.einsum("khd,khd->kh", q_hat, k_hat) / self.scale
         filtered_scores = scores * self.spectral_filter[:, :k].T
+
+        # Apply frequency gate from GNN executive control signal
+        if frequency_gate is not None:
+            # Gate the spectral coefficients - frequency_gate: (num_freqs,)
+            # filtered_scores is (k, num_heads) where k <= num_freqs
+            gate_k = frequency_gate[:k]  # (k,)
+            filtered_scores = filtered_scores * gate_k.unsqueeze(-1)  # (k, num_heads)
+
         weights = torch.softmax(filtered_scores, dim=0)
         weights = self.dropout(weights)
 

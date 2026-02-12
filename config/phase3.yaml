@@ -1,0 +1,26 @@
+model:
+  embedding_dim: 64
+  gnn_hidden: 128
+  gnn_spatial_layers: 4
+  gnn_spectral_layers: 4
+  max_freqs: 16
+  tat_layers: 4
+  tat_spatial_heads: 4
+  tat_spectral_heads: 4
+  tat_ff_dim: 256
+  max_iterations: 7
+  convergence_threshold: 0.1
+  use_wave_dynamics: true
+
+training:
+  learning_rate: 0.0003
+  epochs: 50
+  patience: 10
+  max_norm: 5.0
+  accumulation_steps: 4
+
+data:
+  num_train: 500
+  num_test: 100
+  n_nodes: 10
+  max_delay: 10
