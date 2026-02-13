@@ -35,9 +35,9 @@ def cell_membership_encoding(cc: CellComplex) -> torch.Tensor:
     n0 = cc.num_cells(0)
     n2 = cc.num_cells(2)
     if n2 == 0:
-        return torch.zeros(n0, 0)
+        return torch.zeros(n0, 0, device=cc.device)
 
-    membership = torch.zeros(n0, n2)
+    membership = torch.zeros(n0, n2, device=cc.device)
     for face_idx, boundary_edges in enumerate(cc._2_cell_boundaries):
         # Collect all nodes involved in this face's boundary edges
         nodes_in_face = set()
@@ -91,16 +91,19 @@ class TopologicalPositionalEncoding(nn.Module):
         k = min(self.num_eigenvectors, num_nodes)
         lap_pe = laplacian_pe(cc, dim=0, k=k)
         if lap_pe.shape[1] < self.num_eigenvectors:
-            pad = torch.zeros(num_nodes, self.num_eigenvectors - lap_pe.shape[1])
+            pad = torch.zeros(num_nodes, self.num_eigenvectors - lap_pe.shape[1],
+                              device=lap_pe.device)
             lap_pe = torch.cat([lap_pe, pad], dim=1)
 
-        # Persistence features
+        # Persistence features (computed on CPU via numpy/gudhi, move to device)
         pers_feat = persistence_node_features(cc, num_features=self.num_persistence_features)
+        pers_feat = pers_feat.to(cc.device)
 
         # Cell membership
         membership = cell_membership_encoding(cc)
         if membership.shape[1] < self.max_2_cells:
-            pad = torch.zeros(num_nodes, self.max_2_cells - membership.shape[1])
+            pad = torch.zeros(num_nodes, self.max_2_cells - membership.shape[1],
+                              device=membership.device)
             membership = torch.cat([membership, pad], dim=1)
         elif membership.shape[1] > self.max_2_cells:
             membership = membership[:, :self.max_2_cells]

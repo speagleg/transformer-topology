@@ -1,12 +1,20 @@
 import torch
 import torch.nn as nn
 from src.cell_complex.cell_complex import CellComplex
+from src.cell_complex.structural_features import StructuralFeatureEncoder
 from src.gnn_executive.executive import GNNExecutive
 from src.tat.transformer import TopologyAwareTransformer
 
 
 class ReasoningLoop(nn.Module):
-    """Interleaved GNN-TAT co-processing loop with convergence detection.
+    """ARCHIVED: Symmetric GNN-TAT co-processing loop.
+
+    Superseded by ExecutiveReasoningLoop (hierarchical executive pattern)
+    which outperforms symmetric on all benchmarks. Retained for backward
+    compatibility with Phase 1/2 code and as a baseline reference.
+
+    Original description:
+    Interleaved GNN-TAT co-processing loop with convergence detection.
 
     Alternates between the GNN Executive (spatial + spectral message passing)
     and the Topology-Aware Transformer (dual attention), blending their outputs
@@ -31,10 +39,16 @@ class ReasoningLoop(nn.Module):
     def __init__(self, embedding_dim: int, gnn_hidden: int, gnn_spatial_layers: int,
                  gnn_spectral_layers: int, max_freqs: int, tat_layers: int,
                  tat_spatial_heads: int, tat_spectral_heads: int, tat_ff_dim: int,
-                 max_iterations: int = 5, convergence_threshold: float = 0.01):
+                 max_iterations: int = 5, convergence_threshold: float = 0.01,
+                 use_topological_pe: bool = False,
+                 use_structural_features: bool = False):
         super().__init__()
         self.max_iterations = max_iterations
         self.convergence_threshold = convergence_threshold
+        self.use_structural_features = use_structural_features
+
+        if use_structural_features:
+            self.structural_encoder = StructuralFeatureEncoder(embedding_dim)
         self.gnn_executive = GNNExecutive(
             embedding_dim=embedding_dim, hidden_dim=gnn_hidden,
             num_spatial_layers=gnn_spatial_layers,
@@ -45,6 +59,7 @@ class ReasoningLoop(nn.Module):
             num_spatial_heads=tat_spatial_heads,
             num_spectral_heads=tat_spectral_heads,
             ff_dim=tat_ff_dim, num_freqs=max_freqs,
+            use_topological_pe=use_topological_pe,
         )
         self.blend = nn.Linear(2 * embedding_dim, embedding_dim)
         self.norm = nn.LayerNorm(embedding_dim)
@@ -66,6 +81,11 @@ class ReasoningLoop(nn.Module):
         Returns:
             Tuple of (final_node_embeddings, num_iterations_run).
         """
+        # Add structural features to initial node embeddings
+        if self.use_structural_features:
+            struct_feat = self.structural_encoder(cc)
+            cc.set_embeddings(0, (cc.get_embeddings(0) + struct_feat).detach())
+
         prev_embeddings = cc.get_embeddings(0)
         num_iters = 0
 

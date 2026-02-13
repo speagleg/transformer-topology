@@ -1,15 +1,17 @@
 model:
-  embedding_dim: 64
-  gnn_hidden: 128
-  gnn_spatial_layers: 4
-  gnn_spectral_layers: 4
-  max_freqs: 16
-  tat_layers: 4
-  tat_spatial_heads: 4
-  tat_spectral_heads: 4
-  tat_ff_dim: 256
-  max_iterations: 5
+  embedding_dim: 32
+  gnn_hidden: 64
+  gnn_spatial_layers: 2
+  gnn_spectral_layers: 2
+  max_freqs: 8
+  tat_layers: 2
+  tat_spatial_heads: 2
+  tat_spectral_heads: 2
+  tat_ff_dim: 128
+  max_iterations: 3
   convergence_threshold: 0.1
+  use_wave_dynamics: true
+  use_higher_order: true
   use_topological_pe: true
   use_structural_features: true
 
@@ -18,13 +20,12 @@ training:
   learning_rate: 0.001
   weight_decay: 0.01
   label_smoothing: 0.1
-  epochs: 15
-  patience: 7
+  epochs: 30
+  patience: 10
   max_norm: 5.0
   accumulation_steps: 4
 
 data:
-  # Multi-hop task settings
   task_type: diverse
   min_hops: 2
   max_hops: 10
@@ -32,7 +33,6 @@ data:
   num_train: 1000
   num_test: 200
   n_nodes_range: [30, 80]
-  # Temporal task settings
   n_nodes: 20
   max_delay: 10
   max_edge_delay: 5

@@ -9,3 +9,8 @@ build/
 .coverage
 htmlcov/
 wandb/
+
+# Data and model artifacts
+data/
+models/
+*.pt

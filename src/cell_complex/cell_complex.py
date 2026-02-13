@@ -22,6 +22,37 @@ class CellComplex:
         self._2_cell_signs: list[list[float]] = []  # orientation signs for B2
         self._2_cell_types: list[str] = []
 
+    @property
+    def device(self) -> torch.device:
+        """Return the device of the cell embeddings (defaults to CPU)."""
+        if self._0_cell_embeddings:
+            return self._0_cell_embeddings[0].device
+        return torch.device('cpu')
+
+    def to(self, device: torch.device | str) -> 'CellComplex':
+        """Move all cell embeddings to the given device. Returns self."""
+        device = torch.device(device)
+        self._0_cell_embeddings = [e.to(device) for e in self._0_cell_embeddings]
+        self._1_cell_embeddings = [e.to(device) for e in self._1_cell_embeddings]
+        self._2_cell_embeddings = [e.to(device) for e in self._2_cell_embeddings]
+        return self
+
+    def clone(self) -> 'CellComplex':
+        """Create a copy with cloned embeddings. Structural data is shared."""
+        cc = CellComplex.__new__(CellComplex)
+        cc.embedding_dim = self.embedding_dim
+        cc._0_cell_embeddings = [e.clone() for e in self._0_cell_embeddings]
+        cc._1_cell_embeddings = [e.clone() for e in self._1_cell_embeddings]
+        cc._2_cell_embeddings = [e.clone() for e in self._2_cell_embeddings]
+        cc._0_cell_types = self._0_cell_types
+        cc._1_cell_types = self._1_cell_types
+        cc._1_cell_sources = self._1_cell_sources
+        cc._1_cell_targets = self._1_cell_targets
+        cc._2_cell_boundaries = self._2_cell_boundaries
+        cc._2_cell_signs = self._2_cell_signs
+        cc._2_cell_types = self._2_cell_types
+        return cc
+
     def num_cells(self, dim: int) -> int:
         """Return the number of cells of the given dimension."""
         if dim == 0:
@@ -56,15 +87,15 @@ class CellComplex:
         """Return stacked embeddings for all cells of the given dimension."""
         if dim == 0:
             if not self._0_cell_embeddings:
-                return torch.empty(0, self.embedding_dim)
+                return torch.empty(0, self.embedding_dim, device=self.device)
             return torch.stack(self._0_cell_embeddings)
         elif dim == 1:
             if not self._1_cell_embeddings:
-                return torch.empty(0, self.embedding_dim)
+                return torch.empty(0, self.embedding_dim, device=self.device)
             return torch.stack(self._1_cell_embeddings)
         elif dim == 2:
             if not self._2_cell_embeddings:
-                return torch.empty(0, self.embedding_dim)
+                return torch.empty(0, self.embedding_dim, device=self.device)
             return torch.stack(self._2_cell_embeddings)
         raise ValueError(f"Unsupported cell dimension: {dim}")
 
@@ -172,8 +203,8 @@ class CellComplex:
             n0 = self.num_cells(0)
             n1 = self.num_cells(1)
             if n0 == 0 or n1 == 0:
-                return torch.zeros(max(n0, 1), max(n1, 1))
-            B = torch.zeros(n0, n1)
+                return torch.zeros(max(n0, 1), max(n1, 1), device=self.device)
+            B = torch.zeros(n0, n1, device=self.device)
             for j, (s, t) in enumerate(zip(self._1_cell_sources, self._1_cell_targets)):
                 B[s, j] = -1.0
                 B[t, j] = 1.0
@@ -182,8 +213,8 @@ class CellComplex:
             n1 = self.num_cells(1)
             n2 = self.num_cells(2)
             if n1 == 0 or n2 == 0:
-                return torch.zeros(max(n1, 1), max(n2, 1))
-            B = torch.zeros(n1, n2)
+                return torch.zeros(max(n1, 1), max(n2, 1), device=self.device)
+            B = torch.zeros(n1, n2, device=self.device)
             for j, (boundary_edges, signs) in enumerate(
                 zip(self._2_cell_boundaries, self._2_cell_signs)
             ):
@@ -199,7 +230,7 @@ class CellComplex:
         """
         if dim == 0:
             n = self.num_cells(0)
-            A = torch.zeros(n, n)
+            A = torch.zeros(n, n, device=self.device)
             for s, t in zip(self._1_cell_sources, self._1_cell_targets):
                 A[s, t] = 1.0
                 A[t, s] = 1.0
@@ -207,7 +238,7 @@ class CellComplex:
         elif dim == 1:
             # Edge-edge adjacency: two 1-cells are adjacent if they share a 0-cell endpoint
             n = self.num_cells(1)
-            A = torch.zeros(n, n)
+            A = torch.zeros(n, n, device=self.device)
             for i in range(n):
                 for j in range(i + 1, n):
                     endpoints_i = {self._1_cell_sources[i], self._1_cell_targets[i]}
@@ -230,10 +261,64 @@ class CellComplex:
         product = B1 @ B2
         return torch.allclose(product, torch.zeros_like(product), atol=1e-6)
 
+    def compute_structural_features(self) -> torch.Tensor:
+        """Compute structural features for each 0-cell.
+
+        Returns (N, 5) tensor with:
+            - Normalized degree (degree / max_degree, or 0 if no edges)
+            - is_source indicator (cell type == "source")
+            - is_target indicator (cell type == "target")
+            - is_blocked indicator (cell type == "blocked")
+            - is_source2 indicator (cell type == "source2")
+        """
+        n = self.num_cells(0)
+        if n == 0:
+            return torch.zeros(0, 5, device=self.device)
+
+        features = torch.zeros(n, 5, device=self.device)
+
+        # Degree
+        degrees = torch.zeros(n, device=self.device)
+        for s, t in zip(self._1_cell_sources, self._1_cell_targets):
+            degrees[s] += 1
+            degrees[t] += 1
+        max_deg = degrees.max().item()
+        if max_deg > 0:
+            features[:, 0] = degrees / max_deg
+
+        # Type indicators
+        type_map = {"source": 1, "target": 2, "blocked": 3, "source2": 4}
+        for i, ctype in enumerate(self._0_cell_types):
+            col = type_map.get(ctype)
+            if col is not None:
+                features[i, col] = 1.0
+
+        return features
+
+    def edge_weight_matrix(self, feature_dim: int = 0) -> torch.Tensor:
+        """Build an (N, N) matrix of edge weights from 1-cell embeddings.
+
+        For each edge (s, t), the weight is taken from the edge embedding
+        at the given feature dimension. The matrix is symmetric (undirected).
+
+        Args:
+            feature_dim: Which dimension of the edge embedding to use as weight.
+
+        Returns:
+            Tensor of shape (N, N) where N = num_0_cells. Zero for non-edges.
+        """
+        n = self.num_cells(0)
+        W = torch.zeros(n, n, device=self.device)
+        for i, (s, t) in enumerate(zip(self._1_cell_sources, self._1_cell_targets)):
+            w = self._1_cell_embeddings[i][feature_dim].item()
+            W[s, t] = w
+            W[t, s] = w
+        return W
+
     def edge_index(self) -> torch.Tensor:
         """Return PyG-compatible edge_index tensor (2, 2*num_edges) for undirected graph."""
         sources = self._1_cell_sources
         targets = self._1_cell_targets
-        row = torch.tensor(sources + targets, dtype=torch.long)
-        col = torch.tensor(targets + sources, dtype=torch.long)
+        row = torch.tensor(sources + targets, dtype=torch.long, device=self.device)
+        col = torch.tensor(targets + sources, dtype=torch.long, device=self.device)
         return torch.stack([row, col], dim=0)

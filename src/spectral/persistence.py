@@ -31,7 +31,7 @@ def compute_persistence_diagram(
     if not GUDHI_AVAILABLE:
         return [np.empty((0, 2)) for _ in range(max_dimension + 1)]
 
-    embeddings = cc.get_embeddings(0).detach().numpy()
+    embeddings = cc.get_embeddings(0).detach().cpu().numpy()
     if embeddings.shape[0] < 2:
         return [np.empty((0, 2)) for _ in range(max_dimension + 1)]
 
@@ -125,7 +125,7 @@ def persistence_node_features(
         if len(neighbors) < 2:
             continue
 
-        ego_embs = embeddings[neighbors].numpy()
+        ego_embs = embeddings[neighbors].cpu().numpy()
         rips = gudhi.RipsComplex(points=ego_embs, max_edge_length=float('inf'))
         st = rips.create_simplex_tree(max_dimension=2)
         st.compute_persistence()

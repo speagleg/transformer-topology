@@ -54,7 +54,8 @@ class TATBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, adjacency: torch.Tensor,
                 eigenvalues: torch.Tensor, eigenvectors: torch.Tensor,
-                control_signal: ControlSignal | None = None) -> torch.Tensor:
+                control_signal: ControlSignal | None = None,
+                edge_weights: torch.Tensor | None = None) -> torch.Tensor:
         """Forward pass through the dual-attention block.
 
         Args:
@@ -65,6 +66,8 @@ class TATBlock(nn.Module):
             control_signal: Optional :class:`ControlSignal` from the GNN
                 executive.  When provided, ``spatial_focus`` biases spatial
                 attention and ``frequency_gate`` gates spectral attention.
+            edge_weights: Optional tensor of shape (N, N) with scalar edge
+                weights passed to spatial attention.
 
         Returns:
             Output tensor of shape (N, embed_dim).
@@ -72,7 +75,8 @@ class TATBlock(nn.Module):
         spatial_focus = control_signal.spatial_focus if control_signal is not None else None
         frequency_gate = control_signal.frequency_gate if control_signal is not None else None
 
-        spatial_out = self.spatial_attn(x, adjacency=adjacency, spatial_focus=spatial_focus)
+        spatial_out = self.spatial_attn(x, adjacency=adjacency, spatial_focus=spatial_focus,
+                                        edge_weights=edge_weights)
         spectral_out = self.spectral_attn(x, eigenvalues=eigenvalues, eigenvectors=eigenvectors,
                                           frequency_gate=frequency_gate)
         g = self.gate(torch.cat([spatial_out, spectral_out], dim=-1))
@@ -140,9 +144,12 @@ class TopologyAwareTransformer(nn.Module):
         """
         x = cc.get_embeddings(0)
         adjacency = cc.adjacency_matrix(0)
-        adjacency = adjacency + torch.eye(adjacency.shape[0])
+        adjacency = adjacency + torch.eye(adjacency.shape[0], device=adjacency.device)
         adjacency = (adjacency > 0).float()
         eigenvalues, eigenvectors = spectral_decomposition(cc, dim=0, k=self.num_freqs)
+
+        # Build edge weight matrix from 1-cell embeddings (dim 0 = delay/weight)
+        edge_weights = cc.edge_weight_matrix(feature_dim=0) if cc.num_cells(1) > 0 else None
 
         if self.use_topological_pe:
             topo_pe = self.topo_pe(cc)
@@ -150,5 +157,5 @@ class TopologyAwareTransformer(nn.Module):
 
         for block in self.blocks:
             x = block(x, adjacency, eigenvalues, eigenvectors,
-                      control_signal=control_signal)
+                      control_signal=control_signal, edge_weights=edge_weights)
         return x

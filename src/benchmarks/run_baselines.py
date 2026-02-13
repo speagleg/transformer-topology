@@ -129,7 +129,7 @@ def train_model(name: str, model: nn.Module, train_ds, val_ds) -> nn.Module:
 
     for epoch in range(MAX_EPOCHS):
         start = time.time()
-        train_loss = train_epoch(model, train_ds, optimizer)
+        train_loss, _ = train_epoch(model, train_ds, optimizer)
         val_acc, val_loss = evaluate(model, val_ds)
         elapsed = time.time() - start
 

@@ -1,0 +1,41 @@
+model:
+  embedding_dim: 32
+  gnn_hidden: 64
+  gnn_spatial_layers: 2
+  gnn_spectral_layers: 2
+  max_freqs: 8
+  tat_layers: 2
+  tat_spatial_heads: 2
+  tat_spectral_heads: 2
+  tat_ff_dim: 128
+  max_iterations: 5
+  convergence_threshold: 0.1
+  use_wave_dynamics: true
+  use_higher_order: true
+  use_topological_pe: true
+  use_structural_features: true
+
+training:
+  device: auto
+  learning_rate: 0.001
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  epochs: 2
+  patience: 2
+  max_norm: 5.0
+  accumulation_steps: 4
+
+benchmark:
+  tier: 1
+  seed: 42
+  train_n_nodes: 15
+  test_n_nodes: [15, 30]
+  train_topologies: [ba, ws, sbm, er]
+  test_topologies: [grid, tree, ladder, caveman]
+  num_train: 20
+  num_val: 5
+  num_test: 10
+  # symmetric variant archived — hierarchical is the primary architecture
+  model_variants: [hierarchical, hierarchical_nowave]
+  collect_diagnostics: true
+  output_dir: data/benchmark_smoke

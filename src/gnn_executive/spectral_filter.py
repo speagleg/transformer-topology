@@ -15,7 +15,8 @@ class SpectralFilterLayer(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, num_freqs: int):
         super().__init__()
         self.num_freqs = num_freqs
-        self.filter_weights = nn.Parameter(torch.randn(num_freqs, in_dim, out_dim) * 0.01)
+        self.filter_weights = nn.Parameter(torch.ones(num_freqs, in_dim))  # diagonal scaling
+        self.output_proj = nn.Linear(in_dim, out_dim)
         self.norm = nn.LayerNorm(out_dim)
 
     def forward(self, x: torch.Tensor, eigenvalues: torch.Tensor, eigenvectors: torch.Tensor) -> torch.Tensor:
@@ -32,8 +33,8 @@ class SpectralFilterLayer(nn.Module):
         k = min(self.num_freqs, eigenvectors.shape[1])
         U = eigenvectors[:, :k]  # (N, k)
         x_hat = U.T @ x  # (k, in_dim) — graph Fourier transform
-        x_filtered = torch.einsum("ki,kio->ko", x_hat, self.filter_weights[:k])  # (k, out_dim)
-        out = U @ x_filtered  # (N, out_dim) — inverse graph Fourier transform
+        x_filtered = x_hat * self.filter_weights[:k]  # (k, in_dim) — diagonal scaling
+        out = self.output_proj(U @ x_filtered)  # (N, out_dim) — inverse GFT + projection
         return self.norm(out)
 
 

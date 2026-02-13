@@ -79,7 +79,7 @@ class TopologicalReasoningModel(nn.Module):
         target_emb = output[target_node]
         diff_emb = query_emb - target_emb
 
-        hodge_features = self._compute_hodge_features(cc)
+        hodge_features = self._compute_hodge_features(cc).to(query_emb.device)
 
         combined = torch.cat([query_emb, target_emb, diff_emb, hodge_features])
         logits = self.classifier(combined)

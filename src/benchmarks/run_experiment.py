@@ -10,6 +10,14 @@ from src.benchmarks.multi_hop import MultiHopDataset
 from src.benchmarks.trainer import train_epoch, evaluate
 
 
+def _resolve_device(tc):
+    """Resolve training device from config."""
+    dev = tc.get("device", "auto")
+    if dev == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(dev)
+
+
 def run_experiment(config_path: str = "config/default.yaml"):
     with open(config_path) as f:
         config = yaml.safe_load(f)
@@ -19,25 +27,34 @@ def run_experiment(config_path: str = "config/default.yaml"):
     bc = config["benchmark"]
     rc = config["reasoning_loop"]
 
+    device = _resolve_device(tc)
+
     print("=" * 60)
     print("Phase 1: Multi-Hop Graph Traversal Benchmark")
+    print(f"Device: {device}")
     print("=" * 60)
 
-    print("\nGenerating datasets...")
+    task_type = bc.get("task_type", "chain")
+    n_nodes_range = tuple(bc.get("n_nodes_range", [30, 80]))
+
+    print(f"\nGenerating datasets (task_type={task_type})...")
     train_ds = MultiHopDataset(
         num_samples=bc["num_train"], min_hops=bc["min_hops"],
         max_hops=bc["max_hops"], num_distractors=bc["num_distractors"],
         embedding_dim=mc["embedding_dim"],
+        task_type=task_type, n_nodes_range=n_nodes_range,
     )
     val_ds = MultiHopDataset(
         num_samples=bc["num_val"], min_hops=bc["min_hops"],
         max_hops=bc["max_hops"], num_distractors=bc["num_distractors"],
         embedding_dim=mc["embedding_dim"],
+        task_type=task_type, n_nodes_range=n_nodes_range,
     )
     test_ds = MultiHopDataset(
         num_samples=bc["num_test"], min_hops=bc["min_hops"],
         max_hops=bc["max_hops"], num_distractors=bc["num_distractors"],
         embedding_dim=mc["embedding_dim"],
+        task_type=task_type, n_nodes_range=n_nodes_range,
     )
     print(f"  Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
 
@@ -56,21 +73,28 @@ def run_experiment(config_path: str = "config/default.yaml"):
         convergence_threshold=rc.get("convergence_threshold", 0.1),
     )
 
+    model.to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"\nModel parameters: {total_params:,}")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=tc["learning_rate"])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=tc["learning_rate"],
+                                   weight_decay=tc.get("weight_decay", 0.01))
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     best_val_acc = 0.0
     patience_counter = 0
     results = []
 
+    label_smoothing = tc.get("label_smoothing", 0.1)
+
     print("\nTraining...")
     for epoch in range(tc["max_epochs"]):
         start = time.time()
-        train_loss = train_epoch(model, train_ds, optimizer)
-        val_acc, val_loss = evaluate(model, val_ds)
+        train_loss, _ = train_epoch(model, train_ds, optimizer,
+                                    label_smoothing=label_smoothing,
+                                    device=device)
+        val_acc, val_loss = evaluate(model, val_ds, label_smoothing=label_smoothing,
+                                     device=device)
         elapsed = time.time() - start
 
         scheduler.step(val_loss)
@@ -98,8 +122,10 @@ def run_experiment(config_path: str = "config/default.yaml"):
                 print(f"\nEarly stopping at epoch {epoch}")
                 break
 
-    model.load_state_dict(torch.load("models/best_phase1.pt", weights_only=True))
-    test_acc, test_loss = evaluate(model, test_ds)
+    model.load_state_dict(torch.load("models/best_phase1.pt", weights_only=True,
+                                     map_location=device))
+    test_acc, test_loss = evaluate(model, test_ds, label_smoothing=label_smoothing,
+                                   device=device)
     print(f"\nTest Accuracy: {test_acc:.3f} | Test Loss: {test_loss:.4f}")
 
     print("\nPer-hop accuracy:")
@@ -109,7 +135,8 @@ def run_experiment(config_path: str = "config/default.yaml"):
             num_distractors=bc["num_distractors"],
             embedding_dim=mc["embedding_dim"],
         )
-        hop_acc, _ = evaluate(model, hop_ds)
+        hop_acc, _ = evaluate(model, hop_ds, label_smoothing=label_smoothing,
+                              device=device)
         print(f"  {h}-hop: {hop_acc:.3f}")
 
     Path("data").mkdir(exist_ok=True)

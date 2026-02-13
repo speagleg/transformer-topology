@@ -4,10 +4,16 @@ Three task types:
 - Cycle detection: does the graph contain a cycle? (binary)
 - Path counting: how many edge-disjoint paths exist between two nodes?
 - Betti number prediction: what is beta_1 of the complex?
+
+Each task supports two modes:
+- Original (hand-crafted graphs): backward-compatible, controlled structure
+- Diverse topology mode: uses random_graph() + nx_to_cell_complex() for
+  structural embeddings and varied graph topologies
 """
 
 import torch
 import random
+import networkx as nx
 from src.cell_complex.cell_complex import CellComplex
 
 
@@ -165,34 +171,208 @@ def generate_betti_task(
     return cc, nodes[0], nodes[1], target_beta1
 
 
+def generate_cycle_detection_task_diverse(
+    n_nodes: int,
+    embedding_dim: int,
+    topologies: list[str] | None = None,
+) -> tuple[CellComplex, int, int, int]:
+    """Generate a cycle detection task using diverse graph topologies.
+
+    Uses random_graph() + nx_to_cell_complex() for structural embeddings.
+    Balances classes by mixing ~50% tree (no cycle) with ~50% other topologies.
+
+    Args:
+        n_nodes: Number of nodes.
+        embedding_dim: Dimension of cell embeddings.
+        topologies: List of allowed topology names, or None for all.
+
+    Returns:
+        (cc, source, target, answer) where answer is 1 if cycle, 0 if not.
+    """
+    from src.benchmarks.graph_generators import random_graph
+    from src.benchmarks.graph_convert import nx_to_cell_complex
+
+    # Balance: 50% trees (no cycles), 50% other topologies (usually have cycles)
+    force_tree = random.random() < 0.5
+
+    if force_tree:
+        topo = 'tree'
+    elif topologies:
+        non_tree = [t for t in topologies if t != 'tree']
+        topo = random.choice(non_tree) if non_tree else random.choice(topologies)
+    else:
+        topo = random.choice(['ba', 'ws', 'sbm', 'grid', 'ladder', 'caveman', 'er'])
+
+    G = random_graph(n_nodes, topology=topo)
+    nodes = list(G.nodes())
+    source_nx, target_nx = random.sample(nodes, 2)
+
+    cc, node_map = nx_to_cell_complex(
+        G, embedding_dim,
+        source_node=source_nx,
+        target_node=target_nx,
+    )
+
+    has_cycle = len(nx.cycle_basis(G)) > 0
+    answer = 1 if has_cycle else 0
+    return cc, node_map[source_nx], node_map[target_nx], answer
+
+
+def generate_betti_task_diverse(
+    n_nodes: int,
+    embedding_dim: int,
+    max_beta: int = 5,
+    topologies: list[str] | None = None,
+) -> tuple[CellComplex, int, int, int]:
+    """Generate a Betti number task using diverse graph topologies.
+
+    Computes beta_1 = |E| - |V| + 1 (for connected graphs) from the
+    actual graph structure.
+
+    Args:
+        n_nodes: Number of nodes.
+        embedding_dim: Dimension of cell embeddings.
+        max_beta: Maximum Betti number (answers capped here).
+        topologies: List of allowed topology names, or None for all.
+
+    Returns:
+        (cc, source, target, answer) where answer is beta_1.
+    """
+    from src.benchmarks.graph_generators import random_graph
+    from src.benchmarks.graph_convert import nx_to_cell_complex
+
+    topo = random.choice(topologies) if topologies else None
+    G = random_graph(n_nodes, topology=topo)
+    nodes = list(G.nodes())
+    source_nx, target_nx = random.sample(nodes, 2)
+
+    cc, node_map = nx_to_cell_complex(
+        G, embedding_dim,
+        source_node=source_nx,
+        target_node=target_nx,
+    )
+
+    # beta_1 = |E| - |V| + num_connected_components (for connected: +1)
+    beta_1 = G.number_of_edges() - G.number_of_nodes() + nx.number_connected_components(G)
+    answer = min(beta_1, max_beta)
+    return cc, node_map[source_nx], node_map[target_nx], answer
+
+
+def generate_path_counting_task_diverse(
+    n_nodes: int,
+    embedding_dim: int,
+    max_paths: int = 4,
+    topologies: list[str] | None = None,
+) -> tuple[CellComplex, int, int, int]:
+    """Generate a path counting task using diverse graph topologies.
+
+    Uses edge_connectivity as the answer (number of edge-disjoint paths).
+
+    Args:
+        n_nodes: Number of nodes.
+        embedding_dim: Dimension of cell embeddings.
+        max_paths: Maximum path count (answers capped here).
+        topologies: List of allowed topology names, or None for all.
+
+    Returns:
+        (cc, source, target, answer) where answer is edge connectivity.
+    """
+    from src.benchmarks.graph_generators import random_graph
+    from src.benchmarks.graph_convert import nx_to_cell_complex
+
+    topo = random.choice(topologies) if topologies else None
+    G = random_graph(n_nodes, topology=topo)
+    nodes = list(G.nodes())
+    source_nx, target_nx = random.sample(nodes, 2)
+
+    cc, node_map = nx_to_cell_complex(
+        G, embedding_dim,
+        source_node=source_nx,
+        target_node=target_nx,
+    )
+
+    try:
+        connectivity = nx.edge_connectivity(G, source_nx, target_nx)
+    except nx.NetworkXError:
+        connectivity = 0
+    answer = min(connectivity, max_paths)
+    return cc, node_map[source_nx], node_map[target_nx], answer
+
+
 class TopologicalDataset:
     """Dataset of topological reasoning benchmark samples.
 
     Supports three task types: cycle_detection, path_counting, betti_number.
+    When use_diverse_topology=True, uses random graph generators with structural
+    embeddings instead of hand-crafted graphs.
     """
 
     def __init__(self, num_samples: int, task_type: str, embedding_dim: int,
+                 use_diverse_topology: bool = False,
+                 topologies: list[str] | None = None,
+                 n_nodes: int = 10,
                  **kwargs):
-        self.samples = []
+        self.samples: list[tuple[CellComplex, int, int, int]] = []
+        self._indices: list[int] | None = None
+
         for _ in range(num_samples):
-            if task_type == "cycle_detection":
-                num_nodes = kwargs.get("num_nodes", random.randint(5, 15))
-                has_cycle = random.choice([True, False])
-                sample = generate_cycle_detection_task(num_nodes, embedding_dim, has_cycle)
-            elif task_type == "path_counting":
-                num_paths = kwargs.get("num_paths", random.randint(1, 4))
-                path_length = kwargs.get("path_length", random.randint(2, 4))
-                sample = generate_path_counting_task(num_paths, path_length, embedding_dim)
-            elif task_type == "betti_number":
-                max_beta = kwargs.get("max_beta", 5)
-                target = random.randint(0, max_beta)
-                sample = generate_betti_task(target, embedding_dim)
+            if use_diverse_topology:
+                sample = self._generate_diverse(
+                    task_type, n_nodes, embedding_dim, topologies, **kwargs,
+                )
             else:
-                raise ValueError(f"Unknown task type: {task_type}")
+                sample = self._generate_original(
+                    task_type, embedding_dim, n_nodes, **kwargs,
+                )
             self.samples.append(sample)
+
+        self.shuffle()
+
+    @staticmethod
+    def _generate_diverse(task_type, n_nodes, embedding_dim, topologies, **kwargs):
+        if task_type == "cycle_detection":
+            return generate_cycle_detection_task_diverse(
+                n_nodes, embedding_dim, topologies=topologies,
+            )
+        elif task_type == "path_counting":
+            max_paths = kwargs.get("max_paths", 4)
+            return generate_path_counting_task_diverse(
+                n_nodes, embedding_dim, max_paths=max_paths, topologies=topologies,
+            )
+        elif task_type == "betti_number":
+            max_beta = kwargs.get("max_beta", 5)
+            return generate_betti_task_diverse(
+                n_nodes, embedding_dim, max_beta=max_beta, topologies=topologies,
+            )
+        else:
+            raise ValueError(f"Unknown task type: {task_type}")
+
+    @staticmethod
+    def _generate_original(task_type, embedding_dim, n_nodes, **kwargs):
+        if task_type == "cycle_detection":
+            num_nodes = kwargs.get("num_nodes", random.randint(5, 15))
+            has_cycle = random.choice([True, False])
+            return generate_cycle_detection_task(num_nodes, embedding_dim, has_cycle)
+        elif task_type == "path_counting":
+            num_paths = kwargs.get("num_paths", random.randint(1, 4))
+            path_length = kwargs.get("path_length", random.randint(2, 4))
+            return generate_path_counting_task(num_paths, path_length, embedding_dim)
+        elif task_type == "betti_number":
+            max_beta = kwargs.get("max_beta", 5)
+            target = random.randint(0, max_beta)
+            return generate_betti_task(target, embedding_dim)
+        else:
+            raise ValueError(f"Unknown task type: {task_type}")
+
+    def shuffle(self):
+        """Shuffle sample access order for the next epoch."""
+        self._indices = list(range(len(self.samples)))
+        random.shuffle(self._indices)
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> tuple[CellComplex, int, int, int]:
+        if self._indices is not None:
+            return self.samples[self._indices[idx]]
         return self.samples[idx]

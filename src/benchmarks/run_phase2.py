@@ -66,9 +66,9 @@ def run_task_experiment(task_type: str, model, tc, bc, tag: str = ""):
     print("Training...")
     for epoch in range(tc["max_epochs"]):
         start = time.time()
-        train_loss = train_epoch(model, train_ds, optimizer,
-                                 max_norm=max_norm,
-                                 accumulation_steps=accumulation_steps)
+        train_loss, _ = train_epoch(model, train_ds, optimizer,
+                                    max_norm=max_norm,
+                                    accumulation_steps=accumulation_steps)
         val_acc, val_loss = evaluate(model, val_ds)
         elapsed = time.time() - start
 

@@ -54,8 +54,9 @@ class TestTraining:
         )
         ds = MultiHopDataset(num_samples=4, min_hops=2, max_hops=4, num_distractors=3, embedding_dim=16)
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-        loss = train_epoch(model, ds, optimizer)
+        loss, grad_norm = train_epoch(model, ds, optimizer)
         assert loss > 0
+        assert grad_norm >= 0
 
     def test_evaluate(self):
         model = MultiHopReasoningModel(

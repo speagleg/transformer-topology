@@ -225,3 +225,81 @@ class TestTemporalDataset:
                 task_type="nonexistent",
                 embedding_dim=16,
             )
+
+
+class TestDiverseTopology:
+    def test_diverse_propagation(self):
+        """Diverse topology propagation produces valid samples."""
+        cc, source, target, answer = generate_propagation_delay_task(
+            n_nodes=15, embedding_dim=16, max_delay=10,
+            max_edge_delay=5, use_diverse_topology=True,
+        )
+        assert cc.num_cells(0) >= 4
+        assert cc.num_cells(1) > 0
+        assert 0 <= answer < 10
+
+    def test_diverse_blocking(self):
+        """Diverse topology blocking produces valid samples."""
+        cc, source, target, answer = generate_blocking_task(
+            n_nodes=15, embedding_dim=16, max_delay=10,
+            max_edge_delay=5, use_diverse_topology=True,
+        )
+        assert cc.num_cells(0) >= 4
+        assert 0 <= answer < 10
+
+    def test_diverse_interference(self):
+        """Diverse topology interference produces binary answers."""
+        cc, source1, target, answer = generate_interference_task(
+            n_nodes=15, embedding_dim=16,
+            max_edge_delay=5, use_diverse_topology=True,
+        )
+        assert cc.num_cells(0) >= 4
+        assert answer in (0, 1)
+
+    def test_wider_delay_range(self):
+        """max_edge_delay=5 produces delays > 3."""
+        found_large_delay = False
+        for _ in range(10):
+            cc, _, _, _ = generate_propagation_delay_task(
+                n_nodes=15, embedding_dim=16, max_delay=20,
+                max_edge_delay=5, use_diverse_topology=True,
+            )
+            for e in range(cc.num_cells(1)):
+                delay = int(cc._1_cell_embeddings[e][0].item())
+                if delay > 3:
+                    found_large_delay = True
+                    break
+            if found_large_delay:
+                break
+        assert found_large_delay
+
+    def test_temporal_shuffle(self):
+        """TemporalDataset supports shuffling."""
+        ds = TemporalDataset(
+            num_samples=10,
+            task_type="propagation_delay",
+            embedding_dim=16,
+            n_nodes=8,
+        )
+        assert hasattr(ds, 'shuffle')
+        order1 = list(ds._indices)
+        ds.shuffle()
+        order2 = list(ds._indices)
+        # Very unlikely same order
+        assert order1 != order2 or len(ds) <= 1
+
+    def test_diverse_dataset(self):
+        """Full dataset with diverse topology generates valid samples."""
+        ds = TemporalDataset(
+            num_samples=10,
+            task_type="propagation_delay",
+            embedding_dim=16,
+            n_nodes=15,
+            max_edge_delay=5,
+            use_diverse_topology=True,
+        )
+        assert len(ds) == 10
+        for i in range(len(ds)):
+            cc, q, t, answer = ds[i]
+            assert isinstance(cc, CellComplex)
+            assert 0 <= answer

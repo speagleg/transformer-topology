@@ -15,6 +15,7 @@ Loop per iteration:
 import torch
 import torch.nn as nn
 from src.cell_complex.cell_complex import CellComplex
+from src.cell_complex.structural_features import StructuralFeatureEncoder
 from src.gnn_executive.executive import GNNExecutive
 from src.gnn_executive.control_head import ControlSignal
 from src.tat.transformer import TopologyAwareTransformer
@@ -39,12 +40,18 @@ class ExecutiveReasoningLoop(nn.Module):
                  tat_spatial_heads: int, tat_spectral_heads: int, tat_ff_dim: int,
                  max_iterations: int = 5, convergence_threshold: float = 0.1,
                  use_wave_dynamics: bool = True,
-                 use_higher_order: bool = False):
+                 use_higher_order: bool = False,
+                 use_topological_pe: bool = False,
+                 use_structural_features: bool = False):
         super().__init__()
         self.max_iterations = max_iterations
         self.convergence_threshold = convergence_threshold
         self.use_wave_dynamics = use_wave_dynamics
+        self.use_structural_features = use_structural_features
         self.embedding_dim = embedding_dim
+
+        if use_structural_features:
+            self.structural_encoder = StructuralFeatureEncoder(embedding_dim)
 
         self.gnn_executive = GNNExecutive(
             embedding_dim=embedding_dim, hidden_dim=gnn_hidden,
@@ -60,6 +67,7 @@ class ExecutiveReasoningLoop(nn.Module):
             num_spatial_heads=tat_spatial_heads,
             num_spectral_heads=tat_spectral_heads,
             ff_dim=tat_ff_dim, num_freqs=max_freqs,
+            use_topological_pe=use_topological_pe,
         )
 
         if use_wave_dynamics:
@@ -73,7 +81,7 @@ class ExecutiveReasoningLoop(nn.Module):
         Returns scalar tensor (energy of harmonic component).
         """
         if cc.num_cells(1) == 0:
-            return torch.tensor(0.0)
+            return torch.tensor(0.0, device=cc.device)
 
         try:
             edge_embs = cc.get_embeddings(1)
@@ -81,7 +89,7 @@ class ExecutiveReasoningLoop(nn.Module):
             _, _, harmonic = hodge_decomposition(cc, signal, dim=1)
             return harmonic.pow(2).sum()
         except (RuntimeError, ValueError):
-            return torch.tensor(0.0)
+            return torch.tensor(0.0, device=cc.device)
 
     def forward(self, cc: CellComplex) -> tuple[torch.Tensor, int, dict]:
         """Run the hierarchical executive reasoning loop.
@@ -103,6 +111,11 @@ class ExecutiveReasoningLoop(nn.Module):
                 - 'convergence_deltas': list of |harmonic_t - harmonic_{t-1}| values
                 - 'control_signals': list of ControlSignal objects per iteration
         """
+        # Add structural features to initial node embeddings
+        if self.use_structural_features:
+            struct_feat = self.structural_encoder(cc)
+            cc.set_embeddings(0, (cc.get_embeddings(0) + struct_feat).detach())
+
         prev_embeddings = cc.get_embeddings(0)
         prev_harmonic_energy = self._compute_harmonic_energy(cc)
 

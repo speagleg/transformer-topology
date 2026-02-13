@@ -29,11 +29,13 @@ class TopologicalSpatialAttention(nn.Module):
         self.k_proj = nn.Linear(embed_dim, embed_dim)
         self.v_proj = nn.Linear(embed_dim, embed_dim)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
+        self.edge_proj = nn.Linear(1, num_heads)
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x: torch.Tensor, adjacency: torch.Tensor,
-                spatial_focus: torch.Tensor | None = None) -> torch.Tensor:
+                spatial_focus: torch.Tensor | None = None,
+                edge_weights: torch.Tensor | None = None) -> torch.Tensor:
         """Forward pass with adjacency-masked attention.
 
         Args:
@@ -43,6 +45,9 @@ class TopologicalSpatialAttention(nn.Module):
             spatial_focus: Optional tensor of shape ``(N,)`` with values in
                 [0, 1] used as an additive bias on attention scores to steer
                 focus toward specific nodes.  When ``None``, no bias is added.
+            edge_weights: Optional tensor of shape ``(N, N)`` with scalar edge
+                weights.  When provided, projected per-head biases are added
+                to the attention scores before softmax.
 
         Returns:
             Output features of shape ``(N, embed_dim)`` after residual
@@ -63,6 +68,11 @@ class TopologicalSpatialAttention(nn.Module):
         # Apply adjacency mask: block attention to non-adjacent cells
         mask = adjacency.unsqueeze(0).expand(self.num_heads, -1, -1)
         scores = scores.masked_fill(mask == 0, float("-inf"))
+
+        # Apply edge weight bias
+        if edge_weights is not None:
+            edge_bias = self.edge_proj(edge_weights.unsqueeze(-1))  # (N, N, num_heads)
+            scores = scores + edge_bias.permute(2, 0, 1)
 
         # Apply spatial focus bias from GNN executive control signal
         if spatial_focus is not None:

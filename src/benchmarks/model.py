@@ -9,7 +9,9 @@ class MultiHopReasoningModel(nn.Module):
                  gnn_spectral_layers: int, max_freqs: int, tat_layers: int,
                  tat_spatial_heads: int, tat_spectral_heads: int, tat_ff_dim: int,
                  max_hops: int, max_iterations: int = 3,
-                 convergence_threshold: float = 0.01):
+                 convergence_threshold: float = 0.01,
+                 use_topological_pe: bool = False,
+                 use_structural_features: bool = False):
         super().__init__()
         self.reasoning_loop = ReasoningLoop(
             embedding_dim=embedding_dim, gnn_hidden=gnn_hidden,
@@ -20,6 +22,8 @@ class MultiHopReasoningModel(nn.Module):
             tat_spectral_heads=tat_spectral_heads,
             tat_ff_dim=tat_ff_dim, max_iterations=max_iterations,
             convergence_threshold=convergence_threshold,
+            use_topological_pe=use_topological_pe,
+            use_structural_features=use_structural_features,
         )
         self.classifier = nn.Sequential(
             nn.Linear(3 * embedding_dim, 4 * embedding_dim),

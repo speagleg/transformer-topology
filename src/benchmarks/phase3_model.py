@@ -29,7 +29,9 @@ class TemporalReasoningModel(nn.Module):
                  max_classes: int, max_iterations: int = 7,
                  convergence_threshold: float = 0.1,
                  use_wave_dynamics: bool = True,
-                 use_higher_order: bool = True):
+                 use_higher_order: bool = True,
+                 use_topological_pe: bool = False,
+                 use_structural_features: bool = False):
         super().__init__()
         self.embedding_dim = embedding_dim
 
@@ -44,6 +46,8 @@ class TemporalReasoningModel(nn.Module):
             convergence_threshold=convergence_threshold,
             use_wave_dynamics=use_wave_dynamics,
             use_higher_order=use_higher_order,
+            use_topological_pe=use_topological_pe,
+            use_structural_features=use_structural_features,
         )
 
         # Classifier input: query_emb + target_emb + diff_emb + hodge(3) + wave_energy(1) + persistence(32)
@@ -115,9 +119,10 @@ class TemporalReasoningModel(nn.Module):
         target_emb = output[target_node]
         diff_emb = query_emb - target_emb
 
-        hodge_features = self._compute_hodge_features(cc)
-        wave_energy = self._compute_wave_energy(diagnostics)
-        persistence_features = self._compute_persistence_features(cc)
+        dev = query_emb.device
+        hodge_features = self._compute_hodge_features(cc).to(dev)
+        wave_energy = self._compute_wave_energy(diagnostics).to(dev)
+        persistence_features = self._compute_persistence_features(cc).to(dev)
 
         combined = torch.cat([query_emb, target_emb, diff_emb,
                               hodge_features, wave_energy, persistence_features])
