@@ -29,7 +29,7 @@ benchmark:
   tier: 1
   seed: 42
   train_n_nodes: 20
-  test_n_nodes: [20, 40, 80]
+  test_n_nodes: [20, 40]
   train_topologies: [ba, ws, sbm, er]
   test_topologies: [grid, tree, ladder, caveman]
   num_train: 5000

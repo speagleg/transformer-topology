@@ -35,7 +35,6 @@ benchmark:
   num_train: 20
   num_val: 5
   num_test: 10
-  # symmetric variant archived — hierarchical is the primary architecture
-  model_variants: [hierarchical, hierarchical_nowave]
+  model_variants: [hierarchical, symmetric, hierarchical_nowave]
   collect_diagnostics: true
   output_dir: data/benchmark_smoke
