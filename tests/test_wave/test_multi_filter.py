@@ -34,6 +34,11 @@ class TestMultiFilterConstruction:
                                   include_identity=True)
         assert mfd.num_filters == 3
 
+    def test_multi_filter_num_filters_with_sheaf(self):
+        mfd = MultiFilterDynamics(DIM, filter_types=['chebyshev', 'wave_cosine', 'heat'],
+                                  include_identity=True, include_sheaf=True)
+        assert mfd.num_filters == 5  # 3 filters + sheaf + identity
+
 
 class TestMultiFilterForward:
     def test_multi_filter_output_shape(self):
@@ -120,6 +125,38 @@ class TestMultiFilterGradient:
                   diffusion_time=torch.tensor(0.5),
                   wave_damping=torch.tensor(0.1))
         assert torch.allclose(out, signal, atol=1e-4)
+
+    def test_multi_filter_with_sheaf_path(self):
+        """Sheaf diffusion as an ensemble path."""
+        cc = make_chain(DIM, 5)
+        mfd = MultiFilterDynamics(DIM, filter_types=['heat'],
+                                  include_identity=True,
+                                  include_sheaf=True)
+        assert mfd.num_filters == 3  # heat + sheaf + identity
+        signal = cc.get_embeddings(0)
+        out = mfd(cc, signal,
+                  diffusion_time=torch.tensor(0.5),
+                  wave_damping=torch.tensor(0.1))
+        assert out.shape == (5, DIM)
+        assert torch.isfinite(out).all()
+
+    def test_multi_filter_sheaf_weighted(self):
+        """All weight on sheaf path produces sheaf-like output."""
+        cc = make_chain(DIM, 5)
+        mfd = MultiFilterDynamics(DIM, filter_types=['heat'],
+                                  include_identity=False,
+                                  include_sheaf=True,
+                                  use_wave_strength_gate=False)
+        assert mfd.num_filters == 2  # heat + sheaf
+        signal = cc.get_embeddings(0)
+        # Weight: [0.0 (heat), 1.0 (sheaf)]
+        weights = torch.tensor([0.0, 1.0])
+        out = mfd(cc, signal,
+                  diffusion_time=torch.tensor(0.5),
+                  wave_damping=torch.tensor(0.1),
+                  filter_weights=weights)
+        assert out.shape == (5, DIM)
+        assert torch.isfinite(out).all()
 
     def test_multi_filter_single_filter_degenerates(self):
         """Single filter with no identity → similar to WaveDynamics."""

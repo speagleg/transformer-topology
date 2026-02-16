@@ -19,6 +19,7 @@ wave:
   wave_mode: ensemble
   filter_types: [chebyshev, wave_cosine, heat]
   include_identity: true
+  include_sheaf: true           # sheaf diffusion as ensemble path (best BFS: 96% retention)
   laplacian_dim: 0
   wave_strength_gate: true
   use_neural_ode: false         # ensemble replaces ODE blend

@@ -295,12 +295,14 @@ class MultiFilterDynamics(nn.Module):
         filter_types: tuple[str, ...] | list[str] = ('chebyshev', 'wave_cosine', 'heat'),
         laplacian_dim: int = 0,
         include_identity: bool = True,
+        include_sheaf: bool = False,
         use_wave_strength_gate: bool = False,
         use_neural_ode: bool = False,
         **filter_kwargs,
     ):
         super().__init__()
         self.include_identity = include_identity
+        self.include_sheaf = include_sheaf
         self.use_wave_strength_gate = use_wave_strength_gate
         self.use_neural_ode = use_neural_ode
 
@@ -309,7 +311,19 @@ class MultiFilterDynamics(nn.Module):
             for ft in filter_types
         ])
 
-        self.num_paths = len(filter_types) + (1 if include_identity else 0)
+        # Sheaf diffusion as a special ensemble path (learnable restriction maps,
+        # different mechanism from SpectralFilter but same forward interface).
+        if include_sheaf:
+            self.sheaf = SheafWaveDynamics(
+                embedding_dim,
+                use_wave_strength_gate=False,  # ensemble handles gating
+            )
+
+        self.num_paths = (
+            len(filter_types)
+            + (1 if include_identity else 0)
+            + (1 if include_sheaf else 0)
+        )
 
         if use_neural_ode:
             self.wave = WavePropagation(embedding_dim)
@@ -356,6 +370,11 @@ class MultiFilterDynamics(nn.Module):
         for f in self.filters:
             out = f(cc, signal, diffusion_time=diffusion_time)
             outputs.append(out)
+
+        # Sheaf diffusion path
+        if self.include_sheaf:
+            sheaf_out = self.sheaf(cc, signal, diffusion_time, wave_damping)
+            outputs.append(sheaf_out)
 
         # Identity (nowave) path
         if self.include_identity:

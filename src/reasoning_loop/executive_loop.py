@@ -71,11 +71,13 @@ class ExecutiveReasoningLoop(nn.Module):
             elif wave_mode == 'ensemble':
                 filter_types = _wfk.get('filter_types', ['chebyshev', 'wave_cosine', 'heat'])
                 include_identity = _wfk.get('include_identity', True)
+                include_sheaf = _wfk.get('include_sheaf', False)
                 self.wave_dynamics = MultiFilterDynamics(
                     embedding_dim,
                     filter_types=filter_types,
                     laplacian_dim=wave_laplacian_dim,
                     include_identity=include_identity,
+                    include_sheaf=include_sheaf,
                     use_wave_strength_gate=wave_strength_gate,
                     use_neural_ode=wave_use_neural_ode,
                 )

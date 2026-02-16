@@ -24,6 +24,7 @@ wave:
   # Ensemble mode (wave_mode: ensemble):
   # filter_types: [chebyshev, wave_cosine, heat]
   # include_identity: true     # adds nowave path
+  # include_sheaf: true        # adds sheaf diffusion path
 
 llm:
   enabled: false
