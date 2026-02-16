@@ -1,0 +1,69 @@
+model:
+  embedding_dim: 32
+  gnn_hidden: 64
+  gnn_spatial_layers: 2
+  gnn_spectral_layers: 2
+  max_freqs: 8
+  tat_layers: 2
+  tat_spatial_heads: 2
+  tat_spectral_heads: 2
+  tat_ff_dim: 128
+  max_iterations: 5
+  convergence_threshold: 0.1
+  use_wave_dynamics: true
+  use_higher_order: true
+  use_topological_pe: true
+  use_structural_features: true
+
+wave:
+  wave_mode: ensemble
+  filter_types: [chebyshev, wave_cosine, heat]
+  include_identity: true
+  laplacian_dim: 0
+  wave_strength_gate: true
+  use_neural_ode: false         # ensemble replaces ODE blend
+
+llm:
+  llm_dim: 128               # mock backend; set to 2048 for real Llama
+  num_prefix: 4
+  gate_threshold: 0.1
+  mock_hidden: 64
+
+training:
+  device: auto
+  learning_rate: 0.001
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  epochs: 30
+  patience: 7
+  max_norm: 5.0
+  accumulation_steps: 4
+
+benchmark:
+  tier: 3
+  seed: 42
+  train_n_nodes: 20
+  test_n_nodes: [20, 40]
+  num_train: 500
+  num_val: 100
+  num_test: 200
+  max_classes: 16
+  model_variants: [hierarchical_llm]
+  collect_diagnostics: true
+  output_dir: data/phase4c_results
+  checkpoint_dir: data/phase4c_checkpoints
+
+curriculum:
+  phase_a:
+    enabled: true
+    epochs: 15
+    gate_penalty_weight: 1.0
+    tasks: [diverse, bfs, hodge_class]
+  phase_b:
+    enabled: true
+    epochs: 20
+    tasks: [graph_completion]
+  phase_c:
+    enabled: true
+    epochs: 20
+    tasks: [labeled_reasoning, analogical_transfer]

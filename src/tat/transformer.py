@@ -146,7 +146,7 @@ class TopologyAwareTransformer(nn.Module):
         adjacency = cc.adjacency_matrix(0)
         adjacency = adjacency + torch.eye(adjacency.shape[0], device=adjacency.device)
         adjacency = (adjacency > 0).float()
-        eigenvalues, eigenvectors = spectral_decomposition(cc, dim=0, k=self.num_freqs)
+        eigenvalues, eigenvectors = spectral_decomposition(cc, dim=0, k=self.num_freqs, normalize=True)
 
         # Build edge weight matrix from 1-cell embeddings (dim 0 = delay/weight)
         edge_weights = cc.edge_weight_matrix(feature_dim=0) if cc.num_cells(1) > 0 else None

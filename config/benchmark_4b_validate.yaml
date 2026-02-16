@@ -1,0 +1,61 @@
+# Phase 4b validation config — lean run focused on size generalization
+# Estimated: ~1-2 hours wall clock on 8x A100 (6 jobs, ~60 min each)
+#
+# Key differences from benchmark_suite.yaml:
+#   - 2000 train (not 5000) — most learning happens in first 2000
+#   - patience 5 (not 7) — stop wasting epochs
+#   - epochs 30 (not 50) — hard cap
+#   - No topo-transfer (empty test_topologies) — focus on size gen
+#   - 2 variants only: hierarchical + nowave (symmetric dropped)
+#   - Mixed-size training enabled (16-32 nodes)
+
+model:
+  embedding_dim: 32
+  gnn_hidden: 64
+  gnn_spatial_layers: 2
+  gnn_spectral_layers: 2
+  max_freqs: 8
+  tat_layers: 2
+  tat_spatial_heads: 2
+  tat_spectral_heads: 2
+  tat_ff_dim: 128
+  max_iterations: 5
+  convergence_threshold: 0.1
+  use_wave_dynamics: true
+  use_higher_order: true
+  use_topological_pe: true
+  use_structural_features: true
+
+wave:
+  filter_type: heat
+  laplacian_dim: 0
+  wave_strength_gate: true
+  use_neural_ode: true
+
+training:
+  device: auto
+  learning_rate: 0.001
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  epochs: 30
+  patience: 5
+  max_norm: 5.0
+  accumulation_steps: 4
+
+benchmark:
+  tier: 1
+  seed: 42
+  train_n_nodes: 20
+  train_n_nodes_min: 16
+  train_n_nodes_max: 32
+  test_n_nodes: [20, 40, 80]
+  # No topo-transfer — focus on size generalization
+  train_topologies: [ba, ws, sbm, er]
+  test_topologies: []
+  num_train: 2000
+  num_val: 500
+  num_test: 500
+  model_variants: [hierarchical, hierarchical_nowave]
+  collect_diagnostics: true
+  output_dir: data/benchmark_4b_results
+  checkpoint_dir: data/benchmark_4b_checkpoints

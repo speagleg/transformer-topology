@@ -15,6 +15,23 @@ model:
   use_topological_pe: true
   use_structural_features: true
 
+wave:
+  filter_type: heat            # heat, bandpass, wave_cosine, chebyshev, schrodinger, wavelet
+  wave_mode: spectral          # spectral (single filter), sheaf, ensemble (multi-filter)
+  laplacian_dim: 0             # 0=node, 1=edge, 2=face
+  wave_strength_gate: true     # learnable bypass gate (benchmark: let model learn to skip waves)
+  use_neural_ode: true         # WavePropagation ODE alongside spectral filter
+  # Ensemble mode (wave_mode: ensemble):
+  # filter_types: [chebyshev, wave_cosine, heat]
+  # include_identity: true     # adds nowave path
+
+llm:
+  enabled: false
+  llm_dim: 128               # small for CPU testing; 2048 for real Llama
+  num_prefix: 4
+  gate_threshold: 0.1
+  mock_hidden: 64
+
 training:
   device: auto
   learning_rate: 0.001
@@ -29,12 +46,15 @@ benchmark:
   tier: 1
   seed: 42
   train_n_nodes: 20
+  train_n_nodes_min: 16
+  train_n_nodes_max: 32
   test_n_nodes: [20, 40, 80]
   train_topologies: [ba, ws, sbm, er]
   test_topologies: [grid, tree, ladder, caveman]
   num_train: 5000
   num_val: 1000
   num_test: 2000
-  model_variants: [hierarchical, symmetric, hierarchical_nowave]
+  model_variants: [hierarchical, hierarchical_nowave]
   collect_diagnostics: true
   output_dir: data/benchmark_results
+  checkpoint_dir: data/benchmark_checkpoints

@@ -1,0 +1,55 @@
+# Phase 4b Schrödinger filter experiment — parallel to main benchmarks
+# Same as benchmark_4b_validate.yaml but with filter_type: schrodinger
+#
+# Only run the 'hierarchical' variant (nowave is identical across configs)
+# Expected runtime: ~30-60 min on 1 GPU per task (5 jobs total)
+
+model:
+  embedding_dim: 32
+  gnn_hidden: 64
+  gnn_spatial_layers: 2
+  gnn_spectral_layers: 2
+  max_freqs: 8
+  tat_layers: 2
+  tat_spatial_heads: 2
+  tat_spectral_heads: 2
+  tat_ff_dim: 128
+  max_iterations: 5
+  convergence_threshold: 0.1
+  use_wave_dynamics: true
+  use_higher_order: true
+  use_topological_pe: true
+  use_structural_features: true
+
+wave:
+  filter_type: schrodinger
+  laplacian_dim: 0
+  wave_strength_gate: true
+  use_neural_ode: true
+
+training:
+  device: auto
+  learning_rate: 0.001
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  epochs: 30
+  patience: 5
+  max_norm: 5.0
+  accumulation_steps: 4
+
+benchmark:
+  tier: 1
+  seed: 42
+  train_n_nodes: 20
+  train_n_nodes_min: 16
+  train_n_nodes_max: 32
+  test_n_nodes: [20, 40, 80]
+  train_topologies: [ba, ws, sbm, er]
+  test_topologies: []
+  num_train: 2000
+  num_val: 500
+  num_test: 500
+  model_variants: [hierarchical]
+  collect_diagnostics: true
+  output_dir: data/benchmark_4b_results
+  checkpoint_dir: data/benchmark_4b_checkpoints

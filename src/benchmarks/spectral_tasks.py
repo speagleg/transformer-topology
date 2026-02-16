@@ -24,11 +24,15 @@ def _calibrate_spectral_gap_buckets(
     num_buckets: int = 8,
     calibration_size: int = 500,
     topologies: list[str] | None = None,
+    n_nodes_range: tuple[int, int] | None = None,
 ) -> list[float]:
     """Compute bucket boundaries for spectral gap discretization.
 
     Generates a calibration set of graphs, computes lambda_2 for each,
     and returns quantile-based bucket boundaries.
+
+    When ``n_nodes_range`` is set, calibration samples are drawn from the
+    full size range so a single set of boundaries works for all sizes.
 
     Returns:
         List of (num_buckets - 1) boundary values.
@@ -38,7 +42,11 @@ def _calibrate_spectral_gap_buckets(
 
     for _ in range(calibration_size):
         topo = random.choice(all_topos)
-        G = random_graph(n_nodes, topology=topo)
+        if n_nodes_range is not None:
+            cal_n = random.randint(n_nodes_range[0], n_nodes_range[1])
+        else:
+            cal_n = n_nodes
+        G = random_graph(cal_n, topology=topo)
         cc, _ = nx_to_cell_complex(G, embedding_dim, source_node=0, target_node=1)
         try:
             eigenvalues, _ = spectral_decomposition(cc, dim=0)
@@ -69,14 +77,24 @@ _BUCKET_CACHE: dict[tuple, list[float]] = {}
 def _get_bucket_boundaries(
     n_nodes: int, embedding_dim: int, num_buckets: int,
     topologies: list[str] | None,
+    n_nodes_range: tuple[int, int] | None = None,
 ) -> list[float]:
-    """Get or compute cached bucket boundaries."""
+    """Get or compute cached bucket boundaries.
+
+    When ``n_nodes_range`` is set, a single calibration covers the full
+    size range so we don't recalibrate for every distinct n_nodes.
+    """
     topo_key = tuple(sorted(topologies)) if topologies else ()
-    key = (n_nodes, embedding_dim, num_buckets, topo_key)
+    if n_nodes_range is not None:
+        # Cache on the range, not on individual n_nodes
+        key = (n_nodes_range, embedding_dim, num_buckets, topo_key)
+    else:
+        key = (n_nodes, embedding_dim, num_buckets, topo_key)
     if key not in _BUCKET_CACHE:
         _BUCKET_CACHE[key] = _calibrate_spectral_gap_buckets(
             n_nodes, embedding_dim, num_buckets,
             calibration_size=500, topologies=topologies,
+            n_nodes_range=n_nodes_range,
         )
     return _BUCKET_CACHE[key]
 
@@ -86,6 +104,7 @@ def generate_spectral_gap_task(
     embedding_dim: int,
     num_buckets: int = 8,
     topologies: list[str] | None = None,
+    n_nodes_range: tuple[int, int] | None = None,
 ) -> tuple[CellComplex, int, int, int]:
     """Generate a spectral gap (algebraic connectivity) classification task.
 
@@ -97,6 +116,7 @@ def generate_spectral_gap_task(
         embedding_dim: Dimension of cell embeddings.
         num_buckets: Number of discretization buckets (output classes).
         topologies: List of allowed topology names, or None for all.
+        n_nodes_range: If set, calibration uses this range (avoids per-size recalibration).
 
     Returns:
         (cell_complex, source, target, answer) tuple.
@@ -118,7 +138,10 @@ def generate_spectral_gap_task(
     except (RuntimeError, ValueError):
         lambda_2 = 0.0
 
-    boundaries = _get_bucket_boundaries(n_nodes, embedding_dim, num_buckets, topologies)
+    boundaries = _get_bucket_boundaries(
+        n_nodes, embedding_dim, num_buckets, topologies,
+        n_nodes_range=n_nodes_range,
+    )
     answer = _discretize(lambda_2, boundaries)
 
     return cc, node_map[source_nx], node_map[target_nx], answer

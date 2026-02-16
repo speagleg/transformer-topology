@@ -19,6 +19,8 @@ from src.benchmarks.temporal_tasks import TemporalDataset
 from src.spectral.decomposition import hodge_decomposition
 from src.spectral.persistence import vectorize_persistence, compute_persistence_diagram
 from src.benchmarks.phase3_model import PERSISTENCE_FEATURES
+from src.llm.backend import MockLLMBackend
+from src.llm.topo_bridge import TopoBridge
 
 
 class SymmetricMultiHopModel(nn.Module):
@@ -59,7 +61,7 @@ class SymmetricMultiHopModel(nn.Module):
             nn.Linear(2 * embedding_dim, max_classes),
         )
 
-    def forward(self, cc, query_node, target_node):
+    def forward(self, cc, query_node, target_node, metadata=None):
         output, num_iters = self.reasoning_loop(cc)
         query_emb = output[query_node]
         target_emb = output[target_node]
@@ -77,9 +79,13 @@ class HierarchicalMultiHopModel(nn.Module):
                  max_classes, max_iterations, convergence_threshold,
                  use_wave_dynamics=True, use_higher_order=True,
                  use_topological_pe=False,
-                 use_structural_features=False):
+                 use_structural_features=False,
+                 wave_config=None,
+                 use_llm=False, llm_config=None):
         super().__init__()
         self.embedding_dim = embedding_dim
+        self.use_llm = use_llm
+        wc = wave_config or {}
         self.executive_loop = ExecutiveReasoningLoop(
             embedding_dim=embedding_dim, gnn_hidden=gnn_hidden,
             gnn_spatial_layers=gnn_spatial_layers,
@@ -93,7 +99,34 @@ class HierarchicalMultiHopModel(nn.Module):
             use_higher_order=use_higher_order,
             use_topological_pe=use_topological_pe,
             use_structural_features=use_structural_features,
+            wave_filter_type=wc.get('filter_type', 'heat'),
+            wave_laplacian_dim=wc.get('laplacian_dim', 0),
+            wave_strength_gate=wc.get('wave_strength_gate', False),
+            wave_use_neural_ode=wc.get('use_neural_ode', True),
+            wave_mode=wc.get('wave_mode', 'spectral'),
+            wave_filter_kwargs={
+                k: v for k, v in wc.items()
+                if k not in ('filter_type', 'laplacian_dim', 'wave_strength_gate',
+                             'use_neural_ode', 'wave_mode')
+            },
         )
+
+        # TopoBridge (LLM integration)
+        if use_llm:
+            lc = llm_config or {}
+            llm_dim = lc.get('llm_dim', 2048)
+            num_prefix = lc.get('num_prefix', 8)
+            gate_threshold = lc.get('gate_threshold', 0.1)
+            backend = MockLLMBackend(llm_dim=llm_dim, hidden_dim=lc.get('mock_hidden', 256))
+            self.topo_bridge = TopoBridge(
+                backend=backend,
+                topo_dim=embedding_dim,
+                llm_dim=llm_dim,
+                num_prefix=num_prefix,
+                gate_threshold=gate_threshold,
+            )
+        else:
+            self.topo_bridge = None
 
         # hodge(3) + wave_energy(1) + persistence(32)
         classifier_input_dim = 3 * embedding_dim + 3 + 1 + PERSISTENCE_FEATURES
@@ -109,12 +142,13 @@ class HierarchicalMultiHopModel(nn.Module):
             nn.Linear(2 * embedding_dim, max_classes),
         )
 
-    def _compute_hodge_features(self, cc):
+    def _compute_hodge_features(self, cc, initial_edge_embs=None):
         if cc.num_cells(1) == 0 or cc.num_cells(0) == 0:
             return torch.zeros(3)
         try:
-            edge_embs = cc.get_embeddings(1)
-            signal = edge_embs.mean(dim=1)
+            edge_embs = initial_edge_embs if initial_edge_embs is not None else cc.get_embeddings(1)
+            # Use dim 0 where the task signal lives (delay, curl/grad/harmonic).
+            signal = edge_embs[:, 0]
             gradient, curl, harmonic = hodge_decomposition(cc, signal, dim=1)
             return torch.tensor([
                 gradient.abs().mean().item(),
@@ -141,18 +175,52 @@ class HierarchicalMultiHopModel(nn.Module):
         except (RuntimeError, ValueError):
             return torch.zeros(PERSISTENCE_FEATURES)
 
-    def forward(self, cc, query_node, target_node):
+    def forward(self, cc, query_node, target_node, metadata=None):
+        # Capture initial edge embeddings before the executive loop overwrites
+        # them (GNN edge_out is gradient-dominated, destroys curl content).
+        initial_edge_embs = cc.get_embeddings(1).clone() if cc.num_cells(1) > 0 else None
+
         output, num_iters, diagnostics = self.executive_loop(cc)
+
+        # LLM integration: blend executive output with TopoBridge output
+        if self.use_llm and self.topo_bridge is not None:
+            control_signals = diagnostics.get('control_signals', [])
+            if control_signals:
+                llm_gate = control_signals[-1].llm_gate
+            else:
+                llm_gate = torch.tensor(0.0, device=output.device)
+
+            task_text = None
+            if metadata and 'task_prompt' in metadata:
+                task_text = metadata['task_prompt']
+
+            llm_out = self.topo_bridge(output, llm_gate, task_text)
+
+            # Blend: output = (1 - llm_gate) * executive_output + llm_gate * llm_out
+            # TopoBridge already scales by llm_gate, so we just add
+            output = (1 - llm_gate).unsqueeze(-1) * output + llm_out
+
         query_emb = output[query_node]
         target_emb = output[target_node]
         diff_emb = query_emb - target_emb
         dev = query_emb.device
-        hodge_features = self._compute_hodge_features(cc).to(dev)
+        hodge_features = self._compute_hodge_features(
+            cc, initial_edge_embs=initial_edge_embs,
+        ).to(dev)
         wave_energy = self._compute_wave_energy(diagnostics).to(dev)
         persistence_features = self._compute_persistence_features(cc).to(dev)
         combined = torch.cat([query_emb, target_emb, diff_emb,
                               hodge_features, wave_energy, persistence_features])
         return self.classifier(combined)
+
+
+def _unpack_sample(sample):
+    """Unpack a 4-tuple or 5-tuple sample."""
+    if len(sample) == 5:
+        cc, query, target, answer, metadata = sample
+        return cc, query, target, answer, metadata
+    cc, query, target, answer = sample
+    return cc, query, target, answer, None
 
 
 def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
@@ -166,19 +234,25 @@ def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
     grad_norms = []
     optimizer.zero_grad()
     for i in range(len(dataset)):
-        cc, query, target, answer = dataset[i]
+        cc, query, target, answer, metadata = _unpack_sample(dataset[i])
         cc = cc.clone().to(device)
-        logits = model(cc, query, target)
+        logits = model(cc, query, target, metadata=metadata)
         loss = nn.functional.cross_entropy(logits.unsqueeze(0),
                                            torch.tensor([answer], device=device),
                                            label_smoothing=label_smoothing)
         loss = loss / accumulation_steps
+        # Skip backward if loss is NaN (prevents NaN gradient corruption)
+        if torch.isnan(loss) or torch.isinf(loss):
+            continue
         loss.backward()
         total_loss += loss.item() * accumulation_steps
         if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataset):
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
-            grad_norms.append(gn.item() if isinstance(gn, torch.Tensor) else gn)
-            optimizer.step()
+            gn_val = gn.item() if isinstance(gn, torch.Tensor) else gn
+            grad_norms.append(gn_val)
+            # Skip optimizer step if gradients are NaN/Inf (prevents weight corruption)
+            if not (gn_val != gn_val or gn_val == float('inf')):  # NaN != NaN is True
+                optimizer.step()
             optimizer.zero_grad()
     avg_loss = total_loss / len(dataset)
     avg_grad_norm = sum(grad_norms) / len(grad_norms) if grad_norms else 0.0
@@ -192,19 +266,23 @@ def evaluate(model, dataset, label_smoothing=0.0, device=None):
     model.eval()
     correct = 0
     total_loss = 0.0
+    n_valid = 0
     for i in range(len(dataset)):
-        cc, query, target, answer = dataset[i]
+        cc, query, target, answer, metadata = _unpack_sample(dataset[i])
         cc = cc.clone().to(device)
-        logits = model(cc, query, target)
+        logits = model(cc, query, target, metadata=metadata)
         loss = nn.functional.cross_entropy(logits.unsqueeze(0),
                                            torch.tensor([answer], device=device),
                                            label_smoothing=label_smoothing)
-        total_loss += loss.item()
+        loss_val = loss.item()
+        if loss_val == loss_val and loss_val != float('inf'):  # skip NaN/Inf
+            total_loss += loss_val
+            n_valid += 1
         pred = logits.argmax().item()
         if pred == answer:
             correct += 1
     accuracy = correct / len(dataset)
-    avg_loss = total_loss / len(dataset)
+    avg_loss = total_loss / max(n_valid, 1)
     return accuracy, avg_loss
 
 
@@ -224,9 +302,9 @@ def evaluate_per_class(model, dataset, num_classes, device=None):
     confusion = {}
 
     for i in range(len(dataset)):
-        cc, query, target, answer = dataset[i]
+        cc, query, target, answer, metadata = _unpack_sample(dataset[i])
         cc = cc.clone().to(device)
-        logits = model(cc, query, target)
+        logits = model(cc, query, target, metadata=metadata)
         pred = logits.argmax().item()
 
         if answer < num_classes:

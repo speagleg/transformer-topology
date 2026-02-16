@@ -63,7 +63,8 @@ class TopologicalReasoningModel(nn.Module):
 
         try:
             edge_embs = cc.get_embeddings(1)
-            signal = edge_embs.mean(dim=1)
+            # Use dim 0 where the task signal lives (delay, curl/grad/harmonic).
+            signal = edge_embs[:, 0]
             gradient, curl, harmonic = hodge_decomposition(cc, signal, dim=1)
             return torch.tensor([
                 gradient.abs().mean().item(),

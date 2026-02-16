@@ -35,6 +35,7 @@ from src.benchmarks.run_comparison import (
 TIER_1_TASKS = ["diverse", "propagation_delay", "spectral_gap", "hodge_class", "bfs"]
 TIER_2_TASKS = ["blocking", "interference", "cycle_detection", "betti_number",
                 "path_counting", "dijkstra"]
+TIER_3_TASKS = ["graph_completion", "labeled_reasoning", "analogical_transfer"]
 
 
 def _resolve_device(tc: dict) -> torch.device:
@@ -44,7 +45,8 @@ def _resolve_device(tc: dict) -> torch.device:
     return torch.device(dev)
 
 
-def _build_model(variant: str, mc: dict, max_classes: int, device: torch.device):
+def _build_model(variant: str, mc: dict, max_classes: int, device: torch.device,
+                  wave_config: dict | None = None, llm_config: dict | None = None):
     """Build a model for the given variant."""
     common = dict(
         embedding_dim=mc["embedding_dim"],
@@ -70,6 +72,7 @@ def _build_model(variant: str, mc: dict, max_classes: int, device: torch.device)
             **common,
             use_wave_dynamics=mc.get("use_wave_dynamics", True),
             use_higher_order=mc.get("use_higher_order", True),
+            wave_config=wave_config,
         )
     elif variant == "hierarchical_nowave":
         model = HierarchicalMultiHopModel(
@@ -77,14 +80,27 @@ def _build_model(variant: str, mc: dict, max_classes: int, device: torch.device)
             use_wave_dynamics=False,
             use_higher_order=mc.get("use_higher_order", True),
         )
+    elif variant == "hierarchical_llm":
+        model = HierarchicalMultiHopModel(
+            **common,
+            use_wave_dynamics=mc.get("use_wave_dynamics", True),
+            use_higher_order=mc.get("use_higher_order", True),
+            wave_config=wave_config,
+            use_llm=True,
+            llm_config=llm_config,
+        )
     else:
         raise ValueError(f"Unknown model variant: {variant}")
 
     return model.to(device)
 
 
-def _train_and_evaluate(model, train_ds, val_ds, tc, device):
+def _train_and_evaluate(model, train_ds, val_ds, tc, device, checkpoint_path=None):
     """Train model with early stopping on val loss.
+
+    Args:
+        checkpoint_path: If set, save best model checkpoint to this path
+            after each improvement. Allows recovery from SIGTERM/crashes.
 
     Returns:
         dict with best_val_acc, best_train_loss, best_epoch, training_curve.
@@ -140,6 +156,14 @@ def _train_and_evaluate(model, train_ds, val_ds, tc, device):
             best_state = copy.deepcopy(model.state_dict())
             patience_counter = 0
             marker = " *"
+            # Checkpoint on improvement so SIGTERM doesn't lose progress
+            if checkpoint_path is not None:
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': best_state,
+                    'val_acc': best_val_acc,
+                    'training_curve': training_curve,
+                }, checkpoint_path)
         else:
             patience_counter += 1
 
@@ -196,8 +220,15 @@ def _evaluate_per_topology(model, task_type, bc, mc, topologies, max_classes, de
     return breakdown
 
 
-def _dataset_path(datasets_dir: Path, task_type: str, split_name: str, n_nodes: int) -> Path:
-    """Convention for dataset file paths."""
+def _dataset_path(datasets_dir: Path, task_type: str, split_name: str, n_nodes: int,
+                   n_nodes_range: tuple[int, int] | None = None) -> Path:
+    """Convention for dataset file paths.
+
+    Mixed-size datasets get a different filename (e.g. ``_n16-32.pt``) so they
+    can't accidentally load stale fixed-size data.
+    """
+    if n_nodes_range is not None:
+        return datasets_dir / f"{task_type}_{split_name}_n{n_nodes_range[0]}-{n_nodes_range[1]}.pt"
     return datasets_dir / f"{task_type}_{split_name}_n{n_nodes}.pt"
 
 
@@ -209,19 +240,25 @@ def _load_or_generate(
     n_nodes: int,
     emb_dim: int,
     topologies: list[str] | None,
+    n_nodes_range: tuple[int, int] | None = None,
 ) -> BenchmarkDataset:
     """Load dataset from disk if available, else generate and optionally save."""
     if datasets_dir is not None:
-        path = _dataset_path(datasets_dir, task_type, split_name, n_nodes)
+        path = _dataset_path(datasets_dir, task_type, split_name, n_nodes,
+                             n_nodes_range=n_nodes_range)
         if path.exists():
             print(f"    Loading {path.name}...")
             return BenchmarkDataset.load(str(path))
 
-    ds = BenchmarkDataset(num_samples, task_type, n_nodes, emb_dim, topologies=topologies)
+    ds = BenchmarkDataset(
+        num_samples, task_type, n_nodes, emb_dim,
+        topologies=topologies, n_nodes_range=n_nodes_range,
+    )
 
     if datasets_dir is not None:
         datasets_dir.mkdir(parents=True, exist_ok=True)
-        path = _dataset_path(datasets_dir, task_type, split_name, n_nodes)
+        path = _dataset_path(datasets_dir, task_type, split_name, n_nodes,
+                             n_nodes_range=n_nodes_range)
         ds.save(str(path))
         print(f"    Saved {path.name}")
 
@@ -232,21 +269,34 @@ def _generate_datasets(task_type, bc, mc, datasets_dir=None):
     """Generate train/val/test datasets for all splits.
 
     If datasets_dir is provided, datasets are saved/loaded from disk as .pt files.
+    Mixed-size training is enabled when train_n_nodes_min and train_n_nodes_max are set.
     """
     emb_dim = mc["embedding_dim"]
     train_n = bc["train_n_nodes"]
     all_topos = bc.get("train_topologies", []) + bc.get("test_topologies", [])
     ds_dir = Path(datasets_dir) if datasets_dir else None
 
+    # Mixed-size training range (None if not configured)
+    n_min = bc.get("train_n_nodes_min")
+    n_max = bc.get("train_n_nodes_max")
+    train_range = (n_min, n_max) if n_min is not None and n_max is not None else None
+
     datasets = {}
 
-    # ID split: train/val on all topologies at train size
-    print(f"  Generating ID datasets (n={train_n}, all topologies)...")
-    for split, count in [("id_train", "num_train"), ("id_val", "num_val"), ("id_test", "num_test")]:
+    # ID split: train/val use mixed sizes if configured; test is fixed-size
+    size_str = f"n={n_min}-{n_max}" if train_range else f"n={train_n}"
+    print(f"  Generating ID datasets ({size_str} train, n={train_n} test, all topologies)...")
+    for split, count in [("id_train", "num_train"), ("id_val", "num_val")]:
         datasets[split] = _load_or_generate(
             ds_dir, split, task_type, bc[count], train_n, emb_dim,
             topologies=all_topos or None,
+            n_nodes_range=train_range,
         )
+    # Test datasets are always fixed-size for clean evaluation
+    datasets["id_test"] = _load_or_generate(
+        ds_dir, "id_test", task_type, bc["num_test"], train_n, emb_dim,
+        topologies=all_topos or None,
+    )
 
     # Topology transfer: train on train_topologies, test on test_topologies
     train_topos = bc.get("train_topologies")
@@ -256,12 +306,17 @@ def _generate_datasets(task_type, bc, mc, datasets_dir=None):
         for split, count, topos in [
             ("topo_train", "num_train", train_topos),
             ("topo_val", "num_val", train_topos),
-            ("topo_test", "num_test", test_topos),
         ]:
             datasets[split] = _load_or_generate(
                 ds_dir, split, task_type, bc[count], train_n, emb_dim,
                 topologies=topos,
+                n_nodes_range=train_range,
             )
+        # Topo test is fixed-size
+        datasets["topo_test"] = _load_or_generate(
+            ds_dir, "topo_test", task_type, bc["num_test"], train_n, emb_dim,
+            topologies=test_topos,
+        )
 
     # Size generalization: same topologies as ID, different sizes
     test_sizes = bc.get("test_n_nodes", [])
@@ -301,6 +356,8 @@ def run_benchmark_suite(
     mc = config["model"]
     tc = config["training"]
     bc = config["benchmark"]
+    wc = config.get("wave")  # Optional wave config section
+    lc = config.get("llm")   # Optional LLM config section
 
     device = _resolve_device(tc)
     base_seed = bc.get("seed", 42)
@@ -309,6 +366,8 @@ def run_benchmark_suite(
     tasks = list(TIER_1_TASKS)
     if tier >= 2:
         tasks.extend(TIER_2_TASKS)
+    if tier >= 3:
+        tasks.extend(TIER_3_TASKS)
 
     if task_filter:
         if task_filter not in TASK_REGISTRY:
@@ -322,10 +381,13 @@ def run_benchmark_suite(
     collect_diag = bc.get("collect_diagnostics", True)
     output_dir = Path(bc.get("output_dir", "data/benchmark_results"))
     output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = bc.get("checkpoint_dir")
+    if checkpoint_dir:
+        Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
     # Per-job seeding: deterministic and non-overlapping
-    all_task_list = list(TIER_1_TASKS) + list(TIER_2_TASKS)
-    all_variant_list = ["hierarchical", "symmetric", "hierarchical_nowave"]
+    all_task_list = list(TIER_1_TASKS) + list(TIER_2_TASKS) + list(TIER_3_TASKS)
+    all_variant_list = ["hierarchical", "symmetric", "hierarchical_nowave", "hierarchical_llm"]
 
     print("=" * 72)
     mode = "generate-only" if generate_only else "train+eval"
@@ -373,13 +435,18 @@ def run_benchmark_suite(
             start = time.time()
 
             # --- ID evaluation ---
-            model = _build_model(variant, mc, max_classes, device)
+            model = _build_model(variant, mc, max_classes, device, wave_config=wc, llm_config=lc)
             params = sum(p.numel() for p in model.parameters())
             print(f"    Parameters: {params:,}")
 
             print(f"    Training on ID split...")
+            ckpt_path = (
+                str(Path(checkpoint_dir) / f"{task_type}_{variant}_id.pt")
+                if checkpoint_dir else None
+            )
             train_info = _train_and_evaluate(
                 model, datasets["id_train"], datasets["id_val"], tc, device,
+                checkpoint_path=ckpt_path,
             )
             id_acc = _evaluate_dataset(model, datasets["id_test"], device)
             print(f"    ID accuracy: {id_acc:.3f} "
@@ -425,10 +492,15 @@ def run_benchmark_suite(
 
             # --- Topology transfer ---
             if "topo_train" in datasets:
-                topo_model = _build_model(variant, mc, max_classes, device)
+                topo_model = _build_model(variant, mc, max_classes, device, wave_config=wc, llm_config=lc)
                 print(f"    Training on topo-restricted split...")
+                topo_ckpt_path = (
+                    str(Path(checkpoint_dir) / f"{task_type}_{variant}_topo.pt")
+                    if checkpoint_dir else None
+                )
                 topo_train_info = _train_and_evaluate(
                     topo_model, datasets["topo_train"], datasets["topo_val"], tc, device,
+                    checkpoint_path=topo_ckpt_path,
                 )
                 topo_acc = _evaluate_dataset(topo_model, datasets["topo_test"], device)
                 result["topo_transfer_accuracy"] = topo_acc

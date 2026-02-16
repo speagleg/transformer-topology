@@ -4,13 +4,13 @@ from src.cell_complex.cell_complex import CellComplex
 
 
 class StructuralFeatureEncoder(nn.Module):
-    """Encodes structural node features (degree, role indicators) into embedding space.
+    """Encodes structural node features (degree, role indicators, size) into embedding space.
 
-    Takes the 5-dimensional structural features from CellComplex.compute_structural_features()
+    Takes the 7-dimensional structural features from CellComplex.compute_structural_features()
     and projects them to embedding_dim, to be added to node embeddings.
     """
 
-    def __init__(self, embedding_dim: int, num_features: int = 5):
+    def __init__(self, embedding_dim: int, num_features: int = 7):
         super().__init__()
         self.proj = nn.Linear(num_features, embedding_dim)
 

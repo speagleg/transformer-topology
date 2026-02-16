@@ -15,6 +15,12 @@ model:
   use_topological_pe: true
   use_structural_features: true
 
+wave:
+  filter_type: heat            # heat, bandpass, wave_cosine, chebyshev, schrodinger, wavelet
+  laplacian_dim: 0             # 0=node, 1=edge, 2=face
+  wave_strength_gate: false    # learnable bypass gate
+  use_neural_ode: true         # WavePropagation ODE alongside spectral filter
+
 training:
   device: auto  # auto | cpu | cuda | cuda:0
   learning_rate: 0.001

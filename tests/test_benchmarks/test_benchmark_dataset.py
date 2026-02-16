@@ -18,6 +18,7 @@ class TestTaskRegistry:
             "diverse", "propagation_delay", "blocking", "interference",
             "cycle_detection", "path_counting", "betti_number",
             "bfs", "dijkstra", "spectral_gap", "hodge_class",
+            "graph_completion", "labeled_reasoning", "analogical_transfer",
         }
         assert set(TASK_REGISTRY.keys()) == expected
 
@@ -135,3 +136,56 @@ class TestBenchmarkDataset:
         for i in range(len(ds)):
             _, _, _, answer = ds[i]
             assert 0 <= answer < 10
+
+
+class TestMixedSizeTraining:
+    def test_mixed_size_generates_varied_sizes(self):
+        """n_nodes_range produces samples with different node counts."""
+        ds = BenchmarkDataset(
+            num_samples=20, task_type="bfs",
+            n_nodes=16, embedding_dim=16,
+            n_nodes_range=(10, 25),
+        )
+        sizes = {ds.samples[i][0].num_cells(0) for i in range(len(ds))}
+        # With 20 samples across range 10-25, we should see multiple distinct sizes
+        assert len(sizes) > 1, f"Expected varied sizes, got {sizes}"
+        for s in sizes:
+            assert 10 <= s <= 25, f"Size {s} outside range [10, 25]"
+
+    def test_mixed_size_within_range(self):
+        """All samples have node counts within the specified range."""
+        ds = BenchmarkDataset(
+            num_samples=15, task_type="bfs",
+            n_nodes=20, embedding_dim=16,
+            n_nodes_range=(12, 18),
+        )
+        for i in range(len(ds)):
+            cc = ds.samples[i][0]
+            n = cc.num_cells(0)
+            assert 12 <= n <= 18, f"Sample {i}: n={n} outside [12, 18]"
+
+    def test_fixed_size_without_range(self):
+        """Without n_nodes_range, all samples have the same node count."""
+        ds = BenchmarkDataset(
+            num_samples=10, task_type="bfs",
+            n_nodes=16, embedding_dim=16,
+        )
+        for i in range(len(ds)):
+            cc = ds.samples[i][0]
+            assert cc.num_cells(0) == 16
+
+    def test_save_load_with_range(self):
+        """n_nodes_range is preserved through save/load."""
+        ds = BenchmarkDataset(
+            num_samples=5, task_type="hodge_class",
+            n_nodes=20, embedding_dim=16,
+            n_nodes_range=(15, 25),
+        )
+        assert ds.n_nodes_range == (15, 25)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "mixed.pt")
+            ds.save(path)
+            loaded = BenchmarkDataset.load(path)
+            assert loaded.n_nodes_range == (15, 25)
+            assert len(loaded) == 5

@@ -25,6 +25,11 @@ from src.benchmarks.topological_tasks import (
 )
 from src.benchmarks.clrs_tasks import generate_bfs_task, generate_dijkstra_task
 from src.benchmarks.spectral_tasks import generate_spectral_gap_task, generate_hodge_class_task
+from src.benchmarks.llm_tasks import (
+    generate_graph_completion_task,
+    generate_labeled_reasoning_task,
+    generate_analogical_transfer_task,
+)
 
 
 def _wrap_diverse(n_nodes, embedding_dim, topologies, **kwargs):
@@ -172,13 +177,27 @@ def _wrap_dijkstra(n_nodes, embedding_dim, topologies, **kwargs):
 
 def _wrap_spectral_gap(n_nodes, embedding_dim, topologies, **kwargs):
     num_buckets = kwargs.get('num_buckets', 8)
+    n_nodes_range = kwargs.get('n_nodes_range')
     return generate_spectral_gap_task(
         n_nodes, embedding_dim, num_buckets=num_buckets, topologies=topologies,
+        n_nodes_range=n_nodes_range,
     )
 
 
 def _wrap_hodge_class(n_nodes, embedding_dim, topologies, **kwargs):
     return generate_hodge_class_task(n_nodes, embedding_dim, topologies=topologies)
+
+
+def _wrap_graph_completion(n_nodes, embedding_dim, topologies, **kwargs):
+    return generate_graph_completion_task(n_nodes, embedding_dim, topologies=topologies)
+
+
+def _wrap_labeled_reasoning(n_nodes, embedding_dim, topologies, **kwargs):
+    return generate_labeled_reasoning_task(n_nodes, embedding_dim, topologies=topologies)
+
+
+def _wrap_analogical_transfer(n_nodes, embedding_dim, topologies, **kwargs):
+    return generate_analogical_transfer_task(n_nodes, embedding_dim, topologies=topologies)
 
 
 # Task registry: task_type -> (generator_wrapper, max_classes, default_kwargs)
@@ -193,7 +212,10 @@ TASK_REGISTRY: dict[str, tuple[callable, int, dict]] = {
     "bfs":                (_wrap_bfs, 16, {"max_distance": 16}),
     "dijkstra":           (_wrap_dijkstra, 16, {"max_distance": 16, "max_edge_weight": 5}),
     "spectral_gap":       (_wrap_spectral_gap, 8, {"num_buckets": 8}),
-    "hodge_class":        (_wrap_hodge_class, 3, {}),
+    "hodge_class":          (_wrap_hodge_class, 3, {}),
+    "graph_completion":     (_wrap_graph_completion, 2, {}),
+    "labeled_reasoning":    (_wrap_labeled_reasoning, 3, {}),
+    "analogical_transfer":  (_wrap_analogical_transfer, 5, {}),
 }
 
 
@@ -202,6 +224,10 @@ class BenchmarkDataset:
 
     Wraps any task generator with consistent topology/size control.
     Supports save/load and epoch shuffling.
+
+    When ``n_nodes_range`` is provided each sample draws a random node count
+    from ``[range[0], range[1]]`` (inclusive), enabling mixed-size training
+    for better size generalization.
     """
 
     def __init__(
@@ -211,6 +237,7 @@ class BenchmarkDataset:
         n_nodes: int,
         embedding_dim: int,
         topologies: list[str] | None = None,
+        n_nodes_range: tuple[int, int] | None = None,
         **task_kwargs,
     ):
         if task_type not in TASK_REGISTRY:
@@ -221,17 +248,25 @@ class BenchmarkDataset:
 
         self.task_type = task_type
         self.n_nodes = n_nodes
-        self.samples: list[tuple[CellComplex, int, int, int]] = []
+        self.n_nodes_range = n_nodes_range
+        self.samples: list[tuple] = []  # 4-tuple or 5-tuple (with metadata)
         self._indices: list[int] | None = None
 
         generator, _, defaults = TASK_REGISTRY[task_type]
         kwargs = {**defaults, **task_kwargs}
+        if n_nodes_range is not None:
+            kwargs['n_nodes_range'] = n_nodes_range
 
         for i in range(num_samples):
-            sample = generator(n_nodes, embedding_dim, topologies, **kwargs)
+            if n_nodes_range is not None:
+                sample_n = random.randint(n_nodes_range[0], n_nodes_range[1])
+            else:
+                sample_n = n_nodes
+            sample = generator(sample_n, embedding_dim, topologies, **kwargs)
             self.samples.append(sample)
             if (i + 1) % 100 == 0:
-                print(f"    Generated {i + 1}/{num_samples} {task_type} samples (n={n_nodes})")
+                size_str = f"n={n_nodes_range[0]}-{n_nodes_range[1]}" if n_nodes_range else f"n={n_nodes}"
+                print(f"    Generated {i + 1}/{num_samples} {task_type} samples ({size_str})")
 
         self.shuffle()
 
@@ -243,7 +278,7 @@ class BenchmarkDataset:
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> tuple[CellComplex, int, int, int]:
+    def __getitem__(self, idx: int) -> tuple:
         if self._indices is not None:
             return self.samples[self._indices[idx]]
         return self.samples[idx]
@@ -254,6 +289,7 @@ class BenchmarkDataset:
             "samples": self.samples,
             "task_type": self.task_type,
             "n_nodes": self.n_nodes,
+            "n_nodes_range": self.n_nodes_range,
         }, path)
 
     @classmethod
@@ -264,6 +300,7 @@ class BenchmarkDataset:
         obj.samples = data["samples"]
         obj.task_type = data["task_type"]
         obj.n_nodes = data["n_nodes"]
+        obj.n_nodes_range = data.get("n_nodes_range")
         obj._indices = None
         return obj
 

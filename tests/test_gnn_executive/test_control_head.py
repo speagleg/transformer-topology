@@ -55,7 +55,8 @@ class TestControlHead:
         node_emb = torch.randn(5, 32, requires_grad=True)
         cs = head(node_emb)
         loss = (cs.frequency_gate.sum() + cs.spatial_focus.sum() +
-                cs.confidence_weights.sum() + cs.diffusion_time + cs.wave_damping)
+                cs.confidence_weights.sum() + cs.diffusion_time + cs.wave_damping +
+                cs.llm_gate)
         loss.backward()
         assert node_emb.grad is not None
         assert node_emb.grad.abs().sum() > 0
@@ -71,3 +72,15 @@ class TestControlHead:
             assert cs.spatial_focus.shape == (n_nodes,)
             assert cs.confidence_weights.shape == (n_nodes,)
             assert cs.frequency_gate.shape == (8,)
+
+    def test_finite_for_wide_size_range(self):
+        """Control head outputs are finite for n=5 through n=100."""
+        head = ControlHead(embedding_dim=32, num_freqs=8)
+        for n_nodes in [5, 10, 20, 50, 100]:
+            node_emb = torch.randn(n_nodes, 32)
+            cs = head(node_emb)
+            assert torch.isfinite(cs.frequency_gate).all(), f"Non-finite freq_gate at n={n_nodes}"
+            assert torch.isfinite(cs.spatial_focus).all(), f"Non-finite spatial_focus at n={n_nodes}"
+            assert torch.isfinite(cs.confidence_weights).all(), f"Non-finite confidence at n={n_nodes}"
+            assert torch.isfinite(cs.diffusion_time), f"Non-finite diffusion_time at n={n_nodes}"
+            assert torch.isfinite(cs.wave_damping), f"Non-finite wave_damping at n={n_nodes}"

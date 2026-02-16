@@ -264,18 +264,22 @@ class CellComplex:
     def compute_structural_features(self) -> torch.Tensor:
         """Compute structural features for each 0-cell.
 
-        Returns (N, 5) tensor with:
-            - Normalized degree (degree / max_degree, or 0 if no edges)
-            - is_source indicator (cell type == "source")
-            - is_target indicator (cell type == "target")
-            - is_blocked indicator (cell type == "blocked")
-            - is_source2 indicator (cell type == "source2")
+        Returns (N, 7) tensor with:
+            0: Normalized degree (degree / max_degree, or 0 if no edges)
+            1: is_source indicator (cell type == "source")
+            2: is_target indicator (cell type == "target")
+            3: is_blocked indicator (cell type == "blocked")
+            4: is_source2 indicator (cell type == "source2")
+            5: degree / N (degree normalized by total node count)
+            6: log(N) / log(100) (graph scale indicator, same for all nodes)
         """
+        import math
+
         n = self.num_cells(0)
         if n == 0:
-            return torch.zeros(0, 5, device=self.device)
+            return torch.zeros(0, 7, device=self.device)
 
-        features = torch.zeros(n, 5, device=self.device)
+        features = torch.zeros(n, 7, device=self.device)
 
         # Degree
         degrees = torch.zeros(n, device=self.device)
@@ -292,6 +296,10 @@ class CellComplex:
             col = type_map.get(ctype)
             if col is not None:
                 features[i, col] = 1.0
+
+        # Size-aware features
+        features[:, 5] = degrees / n  # degree normalized by total node count
+        features[:, 6] = math.log(max(n, 1)) / math.log(100)  # graph scale
 
         return features
 

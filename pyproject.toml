@@ -23,6 +23,11 @@ spectral = [
 homology = [
     "gudhi>=3.9",
 ]
+llm = [
+    "transformers>=4.40",
+    "peft>=0.10",
+    "sentencepiece>=0.2",
+]
 tracking = [
     "wandb>=0.16",
 ]

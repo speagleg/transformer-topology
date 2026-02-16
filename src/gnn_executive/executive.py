@@ -19,7 +19,8 @@ class GNNExecutive(nn.Module):
     def __init__(self, embedding_dim: int, hidden_dim: int, num_spatial_layers: int,
                  num_spectral_layers: int, max_freqs: int,
                  use_higher_order: bool = False,
-                 produce_control_signals: bool = False):
+                 produce_control_signals: bool = False,
+                 num_filters: int = 0):
         super().__init__()
         self.use_higher_order = use_higher_order
         self.produce_control_signals = produce_control_signals
@@ -48,6 +49,7 @@ class GNNExecutive(nn.Module):
         if produce_control_signals:
             self.control_head = ControlHead(
                 embedding_dim=embedding_dim, num_freqs=max_freqs,
+                num_filters=num_filters,
             )
 
     def forward(self, cc: CellComplex) -> tuple[torch.Tensor, torch.Tensor | None]:

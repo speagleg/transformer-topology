@@ -41,7 +41,11 @@ class DiagnosticCollector:
 
         with torch.no_grad():
             for i in range(len(dataset)):
-                cc, query, target, answer = dataset[i]
+                sample = dataset[i]
+                if len(sample) == 5:
+                    cc, query, target, answer, metadata = sample
+                else:
+                    cc, query, target, answer = sample
                 cc = cc.clone().to(device)
 
                 # Run executive loop directly to get diagnostics
@@ -86,6 +90,16 @@ class DiagnosticCollector:
             # Diffusion time and wave damping
             record['diffusion_time'] = last_cs.diffusion_time.detach().cpu().item()
             record['wave_damping'] = last_cs.wave_damping.detach().cpu().item()
+
+            # LLM gate
+            if last_cs.llm_gate is not None:
+                record['llm_gate'] = last_cs.llm_gate.detach().cpu().item()
+
+            # Filter weights (ensemble mode)
+            if last_cs.filter_weights is not None:
+                fw = last_cs.filter_weights.detach().cpu()
+                record['filter_weights'] = fw.tolist()
+                record['filter_weights_entropy'] = _entropy_discrete(fw).item()
 
         return record
 
@@ -149,6 +163,30 @@ class DiagnosticCollector:
         if wd_vals:
             summary.setdefault('wave_damping', {})['std'] = _std(wd_vals)
 
+        # LLM gate statistics
+        lg_vals = [r['llm_gate'] for r in self._records if 'llm_gate' in r]
+        if lg_vals:
+            summary['llm_gate'] = {
+                'mean': _mean(lg_vals),
+                'std': _std(lg_vals),
+            }
+
+        # Filter weights statistics (ensemble mode)
+        fw_records = [r for r in self._records if 'filter_weights' in r]
+        if fw_records:
+            fw_entropy = [r['filter_weights_entropy'] for r in fw_records]
+            # Average weight per filter path across samples
+            num_filters = len(fw_records[0]['filter_weights'])
+            avg_weights = [
+                _mean([r['filter_weights'][i] for r in fw_records])
+                for i in range(num_filters)
+            ]
+            summary['filter_weights'] = {
+                'entropy_mean': _mean(fw_entropy),
+                'entropy_std': _std(fw_entropy),
+                'avg_weights': avg_weights,
+            }
+
         return summary
 
 
@@ -156,6 +194,12 @@ def _entropy(probs: torch.Tensor) -> torch.Tensor:
     """Compute entropy of a probability-like vector (values in [0,1])."""
     p = probs.clamp(1e-8, 1.0 - 1e-8)
     return -(p * p.log() + (1 - p) * (1 - p).log()).mean()
+
+
+def _entropy_discrete(probs: torch.Tensor) -> torch.Tensor:
+    """Compute Shannon entropy of a discrete probability distribution (e.g. softmax output)."""
+    p = probs.clamp(min=1e-8)
+    return -(p * p.log()).sum()
 
 
 def _gini(values: torch.Tensor) -> torch.Tensor:

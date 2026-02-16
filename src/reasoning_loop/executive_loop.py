@@ -19,7 +19,7 @@ from src.cell_complex.structural_features import StructuralFeatureEncoder
 from src.gnn_executive.executive import GNNExecutive
 from src.gnn_executive.control_head import ControlSignal
 from src.tat.transformer import TopologyAwareTransformer
-from src.wave.dynamics import WaveDynamics
+from src.wave.dynamics import WaveDynamics, SheafWaveDynamics, MultiFilterDynamics
 from src.spectral.decomposition import hodge_decomposition
 
 
@@ -42,7 +42,13 @@ class ExecutiveReasoningLoop(nn.Module):
                  use_wave_dynamics: bool = True,
                  use_higher_order: bool = False,
                  use_topological_pe: bool = False,
-                 use_structural_features: bool = False):
+                 use_structural_features: bool = False,
+                 wave_filter_type: str = 'heat',
+                 wave_laplacian_dim: int = 0,
+                 wave_strength_gate: bool = False,
+                 wave_use_neural_ode: bool = True,
+                 wave_filter_kwargs: dict | None = None,
+                 wave_mode: str = 'spectral'):
         super().__init__()
         self.max_iterations = max_iterations
         self.convergence_threshold = convergence_threshold
@@ -53,6 +59,37 @@ class ExecutiveReasoningLoop(nn.Module):
         if use_structural_features:
             self.structural_encoder = StructuralFeatureEncoder(embedding_dim)
 
+        # Create wave dynamics first to determine num_filters for ControlHead
+        num_filters = 0
+        if use_wave_dynamics:
+            _wfk = wave_filter_kwargs or {}
+            if wave_mode == 'sheaf':
+                self.wave_dynamics = SheafWaveDynamics(
+                    embedding_dim,
+                    use_wave_strength_gate=wave_strength_gate,
+                )
+            elif wave_mode == 'ensemble':
+                filter_types = _wfk.get('filter_types', ['chebyshev', 'wave_cosine', 'heat'])
+                include_identity = _wfk.get('include_identity', True)
+                self.wave_dynamics = MultiFilterDynamics(
+                    embedding_dim,
+                    filter_types=filter_types,
+                    laplacian_dim=wave_laplacian_dim,
+                    include_identity=include_identity,
+                    use_wave_strength_gate=wave_strength_gate,
+                    use_neural_ode=wave_use_neural_ode,
+                )
+                num_filters = self.wave_dynamics.num_filters
+            else:
+                self.wave_dynamics = WaveDynamics(
+                    embedding_dim,
+                    filter_type=wave_filter_type,
+                    laplacian_dim=wave_laplacian_dim,
+                    use_wave_strength_gate=wave_strength_gate,
+                    use_neural_ode=wave_use_neural_ode,
+                    **_wfk,
+                )
+
         self.gnn_executive = GNNExecutive(
             embedding_dim=embedding_dim, hidden_dim=gnn_hidden,
             num_spatial_layers=gnn_spatial_layers,
@@ -60,6 +97,7 @@ class ExecutiveReasoningLoop(nn.Module):
             max_freqs=max_freqs,
             produce_control_signals=True,
             use_higher_order=use_higher_order,
+            num_filters=num_filters,
         )
 
         self.tat = TopologyAwareTransformer(
@@ -70,24 +108,30 @@ class ExecutiveReasoningLoop(nn.Module):
             use_topological_pe=use_topological_pe,
         )
 
-        if use_wave_dynamics:
-            self.wave_dynamics = WaveDynamics(embedding_dim)
-
         self.norm = nn.LayerNorm(embedding_dim)
+
+        # Edge residual ratio: fraction of old edge embeddings to keep.
+        # Prevents total overwrite of initial edge signal (which destroys curl
+        # content that the GNN's B1^T messages can't reconstruct from nodes).
+        # Fixed at 0.5 because the blend happens inside detach() so a learned
+        # gate would get zero gradients.
+        self.edge_residual_ratio = 0.5
 
     def _compute_harmonic_energy(self, cc: CellComplex) -> torch.Tensor:
         """Compute harmonic component energy of edge signals for convergence tracking.
 
-        Returns scalar tensor (energy of harmonic component).
+        Returns scalar tensor (energy normalized by number of edges so that
+        convergence thresholds are size-invariant).
         """
-        if cc.num_cells(1) == 0:
+        num_edges = cc.num_cells(1)
+        if num_edges == 0:
             return torch.tensor(0.0, device=cc.device)
 
         try:
             edge_embs = cc.get_embeddings(1)
-            signal = edge_embs.mean(dim=1)  # (E,)
+            signal = edge_embs[:, 0]  # dim 0 carries the task signal
             _, _, harmonic = hodge_decomposition(cc, signal, dim=1)
-            return harmonic.pow(2).sum()
+            return harmonic.pow(2).sum() / max(1, num_edges)
         except (RuntimeError, ValueError):
             return torch.tensor(0.0, device=cc.device)
 
@@ -142,6 +186,7 @@ class ExecutiveReasoningLoop(nn.Module):
                     cc, gnn_out,
                     diffusion_time=control.diffusion_time,
                     wave_damping=control.wave_damping,
+                    filter_weights=control.filter_weights,
                 )
                 gnn_out = gnn_out + wave_out  # residual addition
 
@@ -159,9 +204,15 @@ class ExecutiveReasoningLoop(nn.Module):
             # Write integrated embeddings back to cell complex
             cc.set_embeddings(0, current_embeddings.detach())
 
-            # Update edge embeddings if available
+            # Update edge embeddings with residual blending.
+            # Pure replacement destroys curl signal because the GNN produces
+            # edge_out primarily via B1^T @ node_features (gradient subspace).
+            # Blending preserves curl content from previous edge embeddings.
             if edge_out is not None:
-                cc.set_embeddings(1, edge_out.detach())
+                old_edge = cc.get_embeddings(1)
+                r = self.edge_residual_ratio
+                blended_edge = (1 - r) * edge_out + r * old_edge
+                cc.set_embeddings(1, blended_edge.detach())
 
             # 5. Harmonic convergence check
             current_harmonic_energy = self._compute_harmonic_energy(cc)

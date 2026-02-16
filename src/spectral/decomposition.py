@@ -5,7 +5,8 @@ from src.spectral.laplacian import hodge_laplacian_0, hodge_laplacian_1, hodge_l
 
 
 def spectral_decomposition(
-    cc: CellComplex, dim: int, k: Optional[int] = None
+    cc: CellComplex, dim: int, k: Optional[int] = None,
+    normalize: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute eigendecomposition of the Hodge Laplacian.
 
@@ -13,6 +14,8 @@ def spectral_decomposition(
         cc: Cell complex to decompose.
         dim: Cell dimension (0 or 1) selecting which Hodge Laplacian to use.
         k: If provided, return only the k smallest eigenvalues/vectors.
+        normalize: If True, normalize eigenvalues to [0, 1] by dividing by
+            the maximum eigenvalue.  Makes spectral features size-invariant.
 
     Returns:
         eigenvalues: Tensor of shape (n,) or (k,), sorted ascending.
@@ -28,6 +31,9 @@ def spectral_decomposition(
         raise ValueError(f"dim={dim} not supported")
 
     eigenvalues, eigenvectors = torch.linalg.eigh(L)
+
+    if normalize:
+        eigenvalues = eigenvalues / eigenvalues.max().clamp(min=1e-8)
 
     if k is not None:
         k = min(k, eigenvalues.shape[0])
@@ -58,19 +64,23 @@ def hodge_decomposition(
     """
     # Gradient component: projection onto image(B_k^T)
     # P_grad = B^T @ (B @ B^T)^+ @ B
+    # Use lstsq instead of pinv to avoid MKL SGESDD bugs on large matrices.
     if dim > 0:
         B = cc.boundary_operator(dim)  # shape: (num_{k-1}_cells, num_k_cells)
-        BBT_pinv = torch.linalg.pinv(B @ B.T)  # (num_{k-1}, num_{k-1})
-        gradient = B.T @ (BBT_pinv @ (B @ signal))
+        Bs = B @ signal  # (num_{k-1},)
+        # Solve (B @ B^T) x = B @ signal  via least-squares
+        x = torch.linalg.lstsq(B @ B.T, Bs.unsqueeze(-1)).solution.squeeze(-1)
+        gradient = B.T @ x
     else:
         gradient = torch.zeros_like(signal)
 
     # Curl component: projection onto image(B_{k+1})
     if cc.num_cells(dim + 1) > 0:
         B_up = cc.boundary_operator(dim + 1)  # shape: (num_k_cells, num_{k+1}_cells)
-        # Project onto column space of B_{k+1}
-        BupTBup_pinv = torch.linalg.pinv(B_up.T @ B_up)
-        curl = B_up @ (BupTBup_pinv @ (B_up.T @ signal))
+        BupTs = B_up.T @ signal  # (num_{k+1},)
+        # Solve (B_up^T @ B_up) x = B_up^T @ signal  via least-squares
+        x = torch.linalg.lstsq(B_up.T @ B_up, BupTs.unsqueeze(-1)).solution.squeeze(-1)
+        curl = B_up @ x
     else:
         curl = torch.zeros_like(signal)
 

@@ -132,6 +132,48 @@ class TestTrainingStep:
         assert loss.item() > 0
 
 
+class TestCurlPreservationInModel:
+    """Verify that hodge features reflect the initial curl signal, not zeroed-out post-loop."""
+
+    def test_hodge_features_preserve_curl(self):
+        """When edge embeddings have a curl signal, _compute_hodge_features
+        should report nonzero curl (via initial_edge_embs path)."""
+        model = make_model(max_classes=3, use_wave=False)
+        # Build a graph with a triangle
+        dim = 16
+        cc = CellComplex(embedding_dim=dim)
+        for i in range(4):
+            cc.add_0_cell(torch.randn(dim), "source" if i == 0 else "node")
+        e0 = cc.add_1_cell(0, 1, torch.randn(dim), "edge")
+        e1 = cc.add_1_cell(1, 2, torch.randn(dim), "edge")
+        e2 = cc.add_1_cell(0, 2, torch.randn(dim), "edge")
+        e3 = cc.add_1_cell(2, 3, torch.randn(dim), "edge")
+        cc.add_2_cell([e0, e1, e2], torch.randn(dim), "face")
+
+        # Inject curl signal
+        B2 = cc.boundary_operator(2)
+        w = torch.randn(cc.num_cells(2))
+        curl_signal = B2 @ w
+        if curl_signal.norm() < 1e-6:
+            pytest.skip("Degenerate B2")
+        curl_signal = curl_signal / curl_signal.norm()
+        emb = cc.get_embeddings(1).clone()
+        emb[:, 0] = curl_signal
+        cc.set_embeddings(1, emb)
+
+        # Run forward - hodge features should use initial edge embeddings
+        logits = model(cc, 0, 3)
+        assert logits.shape == (3,)
+
+        # Verify the initial_edge_embs path: manually call _compute_hodge_features
+        initial_embs = emb.clone()
+        hodge_feat = model._compute_hodge_features(cc, initial_edge_embs=initial_embs)
+        curl_feat = hodge_feat[1].item()
+        assert curl_feat > 1e-4, (
+            f"Curl feature should be nonzero for curl-dominated signal, got {curl_feat:.2e}"
+        )
+
+
 class TestPhase2BackwardCompat:
     def test_phase2_model_still_works(self):
         """Phase 2 model uses the old ReasoningLoop — should still work."""

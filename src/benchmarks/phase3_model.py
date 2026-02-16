@@ -31,9 +31,11 @@ class TemporalReasoningModel(nn.Module):
                  use_wave_dynamics: bool = True,
                  use_higher_order: bool = True,
                  use_topological_pe: bool = False,
-                 use_structural_features: bool = False):
+                 use_structural_features: bool = False,
+                 wave_config: dict | None = None):
         super().__init__()
         self.embedding_dim = embedding_dim
+        wc = wave_config or {}
 
         self.executive_loop = ExecutiveReasoningLoop(
             embedding_dim=embedding_dim, gnn_hidden=gnn_hidden,
@@ -48,6 +50,16 @@ class TemporalReasoningModel(nn.Module):
             use_higher_order=use_higher_order,
             use_topological_pe=use_topological_pe,
             use_structural_features=use_structural_features,
+            wave_filter_type=wc.get('filter_type', 'heat'),
+            wave_laplacian_dim=wc.get('laplacian_dim', 0),
+            wave_strength_gate=wc.get('wave_strength_gate', False),
+            wave_use_neural_ode=wc.get('use_neural_ode', True),
+            wave_mode=wc.get('wave_mode', 'spectral'),
+            wave_filter_kwargs={
+                k: v for k, v in wc.items()
+                if k not in ('filter_type', 'laplacian_dim', 'wave_strength_gate',
+                             'use_neural_ode', 'wave_mode')
+            },
         )
 
         # Classifier input: query_emb + target_emb + diff_emb + hodge(3) + wave_energy(1) + persistence(32)
@@ -64,8 +76,15 @@ class TemporalReasoningModel(nn.Module):
             nn.Linear(2 * embedding_dim, max_classes),
         )
 
-    def _compute_hodge_features(self, cc: CellComplex) -> torch.Tensor:
+    def _compute_hodge_features(
+        self, cc: CellComplex,
+        initial_edge_embs: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Compute Hodge decomposition summary features.
+
+        Uses *initial_edge_embs* (before the executive loop) when available so
+        that curl content from the task signal is preserved.  Falls back to
+        current edge embeddings if ``initial_edge_embs`` is ``None``.
 
         Returns 3 scalar features: mean of gradient, curl, and harmonic norms
         over all edge signals.
@@ -74,8 +93,10 @@ class TemporalReasoningModel(nn.Module):
             return torch.zeros(3)
 
         try:
-            edge_embs = cc.get_embeddings(1)
-            signal = edge_embs.mean(dim=1)
+            edge_embs = initial_edge_embs if initial_edge_embs is not None else cc.get_embeddings(1)
+            # Use dim 0 where the task signal lives (delay, curl/grad/harmonic).
+            # mean(dim=1) dilutes the signal below noise from the other dims.
+            signal = edge_embs[:, 0]
             gradient, curl, harmonic = hodge_decomposition(cc, signal, dim=1)
             return torch.tensor([
                 gradient.abs().mean().item(),
@@ -114,13 +135,21 @@ class TemporalReasoningModel(nn.Module):
             return torch.zeros(PERSISTENCE_FEATURES)
 
     def forward(self, cc: CellComplex, query_node: int, target_node: int) -> torch.Tensor:
+        # Capture initial edge embeddings BEFORE the executive loop overwrites
+        # them.  The loop's GNN produces edge_out mainly via B1^T @ nodes
+        # (gradient subspace), which destroys curl content.  Hodge features
+        # should reflect the original task signal, not the GNN artefact.
+        initial_edge_embs = cc.get_embeddings(1).clone() if cc.num_cells(1) > 0 else None
+
         output, num_iters, diagnostics = self.executive_loop(cc)
         query_emb = output[query_node]
         target_emb = output[target_node]
         diff_emb = query_emb - target_emb
 
         dev = query_emb.device
-        hodge_features = self._compute_hodge_features(cc).to(dev)
+        hodge_features = self._compute_hodge_features(
+            cc, initial_edge_embs=initial_edge_embs,
+        ).to(dev)
         wave_energy = self._compute_wave_energy(diagnostics).to(dev)
         persistence_features = self._compute_persistence_features(cc).to(dev)
 
