@@ -217,7 +217,7 @@ def generate_hodge_class_task(
         L1 = B1.T @ B1
         if B2 is not None:
             L1 = L1 + B2 @ B2.T
-        eigenvalues, eigenvectors = torch.linalg.eigh(L1)
+        eigenvalues, eigenvectors = torch.linalg.eigh(L1.float())
         harmonic_mask = eigenvalues.abs() < 1e-5
         if harmonic_mask.sum() > 0:
             harmonic_basis = eigenvectors[:, harmonic_mask]

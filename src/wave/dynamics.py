@@ -493,7 +493,7 @@ class SheafWaveDynamics(nn.Module):
 
             # Spectral normalization — constrain max singular value ≤ scale
             for i in range(2):
-                U, S, Vh = torch.linalg.svd(maps[i], full_matrices=False)
+                U, S, Vh = torch.linalg.svd(maps[i].float(), full_matrices=False)
                 S = S.clamp(max=1.0)
                 maps[i] = U @ torch.diag(S) @ Vh
             maps = maps * scale
@@ -517,7 +517,7 @@ class SheafWaveDynamics(nn.Module):
         nd = n * d
         if nd <= 512:
             try:
-                eigenvalues, eigenvectors = torch.linalg.eigh(L)
+                eigenvalues, eigenvectors = torch.linalg.eigh(L.float())
                 # Enforce positive semi-definiteness: clamp negative eigenvalues
                 eigenvalues = eigenvalues.clamp(min=0)
                 # Normalize by largest eigenvalue

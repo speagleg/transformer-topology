@@ -78,8 +78,8 @@ def magnetic_spectral_decomposition(
     """
     L_q = magnetic_laplacian(cc, q=q)
 
-    # eigh works on Hermitian matrices, returns real eigenvalues
-    eigenvalues, eigenvectors = torch.linalg.eigh(L_q)
+    # eigh works on Hermitian matrices, returns real eigenvalues (fp32 required)
+    eigenvalues, eigenvectors = torch.linalg.eigh(L_q.to(torch.complex64))
 
     if k is not None:
         k = min(k, eigenvalues.shape[0])

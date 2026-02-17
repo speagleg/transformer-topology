@@ -85,6 +85,7 @@ class HierarchicalMultiHopModel(nn.Module):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.use_llm = use_llm
+        self.bypass_llm = False  # Set True to skip TopoBridge entirely (Phase A)
         wc = wave_config or {}
         self.executive_loop = ExecutiveReasoningLoop(
             embedding_dim=embedding_dim, gnn_hidden=gnn_hidden,
@@ -117,7 +118,18 @@ class HierarchicalMultiHopModel(nn.Module):
             llm_dim = lc.get('llm_dim', 2048)
             num_prefix = lc.get('num_prefix', 8)
             gate_threshold = lc.get('gate_threshold', 0.1)
-            backend = MockLLMBackend(llm_dim=llm_dim, hidden_dim=lc.get('mock_hidden', 256))
+            backend_type = lc.get('backend', 'mock')
+            if backend_type == 'llama':
+                from src.llm.llama_backend import LlamaBackend
+                backend = LlamaBackend(
+                    model_name=lc.get('model_name', 'meta-llama/Llama-3.2-1B'),
+                    cross_attn_layer=lc.get('cross_attn_layer', 8),
+                    lora_rank=lc.get('lora_rank', 16),
+                    lora_alpha=lc.get('lora_alpha', 32),
+                    hidden_dim=llm_dim,
+                )
+            else:
+                backend = MockLLMBackend(llm_dim=llm_dim, hidden_dim=lc.get('mock_hidden', 256))
             self.topo_bridge = TopoBridge(
                 backend=backend,
                 topo_dim=embedding_dim,
@@ -183,7 +195,7 @@ class HierarchicalMultiHopModel(nn.Module):
         output, num_iters, diagnostics = self.executive_loop(cc)
 
         # LLM integration: blend executive output with TopoBridge output
-        if self.use_llm and self.topo_bridge is not None:
+        if self.use_llm and self.topo_bridge is not None and not self.bypass_llm:
             control_signals = diagnostics.get('control_signals', [])
             if control_signals:
                 llm_gate = control_signals[-1].llm_gate

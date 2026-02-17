@@ -8,6 +8,7 @@ Phase C: Language + Analogy — full training on all tasks, no gate constraints.
 Usage:
     python scripts/run_phase4c_curriculum.py [config_path]
     python scripts/run_phase4c_curriculum.py config/benchmark_4c_llm.yaml
+    python scripts/run_phase4c_curriculum.py config/llama_training.yaml --pregenerated-dir data/llama_datasets
 """
 
 import argparse
@@ -23,6 +24,43 @@ from src.benchmarks.benchmark_dataset import BenchmarkDataset, get_max_classes
 from src.benchmarks.diagnostics import DiagnosticCollector
 from src.benchmarks.run_benchmark_suite import _build_model, _resolve_device
 from src.benchmarks.run_comparison import _unpack_sample
+
+
+def _build_optimizer(model, lr: float, weight_decay: float = 0.01,
+                     llm_lr_scale: float = 0.5, freeze_llm: bool = False):
+    """Build optimizer with differential learning rates.
+
+    GNN/TAT/classifier params get full LR; TopoBridge/LLM params get scaled LR.
+    During Phase A (freeze_llm=True), LLM params are frozen entirely.
+    """
+    core_params = []
+    llm_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if 'topo_bridge' in name or 'llm' in name:
+            if freeze_llm:
+                param.requires_grad = False
+            else:
+                llm_params.append(param)
+        else:
+            core_params.append(param)
+
+    param_groups = [{'params': core_params, 'lr': lr}]
+    if llm_params:
+        param_groups.append({'params': llm_params, 'lr': lr * llm_lr_scale})
+
+    return torch.optim.AdamW(param_groups, weight_decay=weight_decay)
+
+
+def _unfreeze_llm(model):
+    """Re-enable gradients on LLM params (after Phase A)."""
+    for name, param in model.named_parameters():
+        if 'topo_bridge' in name or 'llm' in name:
+            # Only unfreeze params that were originally trainable
+            # (Llama base is frozen, LoRA/cross-attn are trainable)
+            if 'lora' in name or 'topo_cross_attn' in name or 'topo_bridge' in name:
+                param.requires_grad = True
 
 
 def _llm_gate_penalty(model, weight: float = 1.0) -> torch.Tensor:
@@ -46,8 +84,9 @@ def _llm_gate_penalty(model, weight: float = 1.0) -> torch.Tensor:
 def train_epoch_with_gate_penalty(
     model, dataset, optimizer, gate_penalty_weight=0.0,
     max_norm=5.0, accumulation_steps=4, label_smoothing=0.0, device=None,
+    scaler=None,
 ):
-    """Training loop with optional llm_gate penalty.
+    """Training loop with optional llm_gate penalty and AMP support.
 
     When gate_penalty_weight > 0, adds an auxiliary loss term that
     penalizes the llm_gate value, encouraging the model to keep the
@@ -59,6 +98,7 @@ def train_epoch_with_gate_penalty(
     if hasattr(dataset, 'shuffle'):
         dataset.shuffle()
 
+    use_amp = scaler is not None and device.type == 'cuda'
     total_loss = 0.0
     total_gate_loss = 0.0
     grad_norms = []
@@ -68,48 +108,47 @@ def train_epoch_with_gate_penalty(
         cc, query, target, answer, metadata = _unpack_sample(dataset[i])
         cc = cc.clone().to(device)
 
-        logits = model(cc, query, target, metadata=metadata)
-        ce_loss = torch.nn.functional.cross_entropy(
-            logits.unsqueeze(0),
-            torch.tensor([answer], device=device),
-            label_smoothing=label_smoothing,
-        )
+        with torch.amp.autocast('cuda', enabled=use_amp):
+            logits = model(cc, query, target, metadata=metadata)
+            ce_loss = torch.nn.functional.cross_entropy(
+                logits.unsqueeze(0),
+                torch.tensor([answer], device=device),
+                label_smoothing=label_smoothing,
+            )
 
-        # Gate penalty: penalize llm_gate if weight > 0
-        gate_loss = torch.tensor(0.0, device=device)
-        if gate_penalty_weight > 0 and hasattr(model, 'executive_loop'):
-            # Access the last control signal from the executive loop
-            # The forward pass just ran, so diagnostics are available
-            # We need to run the executive loop again to get the gate value
-            # Actually, we extract it from the model's last forward
-            if hasattr(model, 'use_llm') and model.use_llm:
-                # Get gate from the last control signal
-                # The executive_loop stores diagnostics during forward
-                # We can get the llm_gate from the control head directly
-                with torch.no_grad():
-                    pass  # Gate is already used in forward
+            # Gate penalty: penalize llm_gate if weight > 0
+            gate_loss = torch.tensor(0.0, device=device)
+            if gate_penalty_weight > 0 and hasattr(model, 'executive_loop'):
+                if hasattr(model, 'use_llm') and model.use_llm:
+                    node_emb = cc.get_embeddings(0).to(device)
+                    ctrl = model.executive_loop.gnn_executive.control_head(node_emb)
+                    gate_loss = gate_penalty_weight * ctrl.llm_gate
 
-                # Recompute gate with grad for penalty
-                # Use the pooled embedding approach
-                node_emb = cc.get_embeddings(0).to(device)
-                ctrl = model.executive_loop.gnn_executive.control_head(node_emb)
-                gate_loss = gate_penalty_weight * ctrl.llm_gate
-
-        loss = (ce_loss + gate_loss) / accumulation_steps
+            loss = (ce_loss + gate_loss) / accumulation_steps
 
         if torch.isnan(loss) or torch.isinf(loss):
             continue
 
-        loss.backward()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
         total_loss += ce_loss.item()
         total_gate_loss += gate_loss.item()
 
         if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataset):
+            if scaler is not None:
+                scaler.unscale_(optimizer)
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
             gn_val = gn.item() if isinstance(gn, torch.Tensor) else gn
             grad_norms.append(gn_val)
             if not (gn_val != gn_val or gn_val == float('inf')):
-                optimizer.step()
+                if scaler is not None:
+                    scaler.step(optimizer)
+                else:
+                    optimizer.step()
+            if scaler is not None:
+                scaler.update()
             optimizer.zero_grad()
 
     n = len(dataset)
@@ -119,7 +158,38 @@ def train_epoch_with_gate_penalty(
     return avg_loss, avg_gate_loss, avg_grad_norm
 
 
-def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml"):
+def _load_or_generate(
+    pregenerated_dir: Path | None,
+    task_type: str,
+    split: str,
+    num_samples: int,
+    n_nodes: int,
+    embedding_dim: int,
+    topologies: list[str] | None = None,
+    n_nodes_range: tuple[int, int] | None = None,
+) -> BenchmarkDataset:
+    """Load pregenerated dataset if available, else generate on-the-fly."""
+    if pregenerated_dir is not None:
+        range_str = (f"n{n_nodes_range[0]}-{n_nodes_range[1]}"
+                     if n_nodes_range else f"n{n_nodes}")
+        path = pregenerated_dir / f"{task_type}_{split}_{range_str}.pt"
+        if path.exists():
+            print(f"    Loading {path.name}...")
+            ds = BenchmarkDataset.load(str(path))
+            if len(ds) > num_samples:
+                ds.samples = ds.samples[:num_samples]
+            return ds
+        else:
+            print(f"    {path.name} not found, generating on-the-fly...")
+
+    return BenchmarkDataset(
+        num_samples, task_type, n_nodes, embedding_dim,
+        topologies=topologies, n_nodes_range=n_nodes_range,
+    )
+
+
+def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
+                   pregenerated_dir: str | None = None):
     """Run the three-phase curriculum training."""
     with open(config_path) as f:
         config = yaml.safe_load(f)
@@ -134,10 +204,29 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml"):
     device = _resolve_device(tc)
     output_dir = Path(bc.get("output_dir", "data/phase4c_results"))
     output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = Path(bc.get("checkpoint_dir", output_dir / "checkpoints"))
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mixed-size training range
+    n_min = bc.get("train_n_nodes_min")
+    n_max = bc.get("train_n_nodes_max")
+    train_range = (n_min, n_max) if n_min is not None and n_max is not None else None
+
+    # Topologies
+    train_topos = bc.get("train_topologies")
+    test_topos = bc.get("test_topologies")
+    all_topos = ((train_topos or []) + (test_topos or [])) or None
+
+    # Pregenerated data directory
+    pregen_dir = Path(pregenerated_dir) if pregenerated_dir else None
 
     print("=" * 72)
     print("Phase 4c: LLM Integration Curriculum Training")
     print(f"Device: {device}")
+    if pregen_dir:
+        print(f"Pregenerated data: {pregen_dir}")
+    if train_range:
+        print(f"Mixed-size training: n={train_range[0]}-{train_range[1]}")
     print("=" * 72)
 
     # Build model with LLM
@@ -160,6 +249,10 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml"):
     train_n = bc["train_n_nodes"]
     all_results = {}
 
+    # AMP disabled: spectral ops (eigh, svd, lstsq) require fp32,
+    # making autocast counterproductive (casting overhead > fp16 savings).
+    scaler = None
+
     # ---- Phase A: Regression Lock ----
     phase_a = cc.get("phase_a", {})
     if phase_a.get("enabled", True):
@@ -168,6 +261,12 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml"):
         print(f"{'─' * 72}")
 
         gate_penalty = phase_a.get("gate_penalty_weight", 1.0)
+        model.bypass_llm = True  # Skip TopoBridge entirely during Phase A
+
+        # Move Llama to CPU during Phase A to free VRAM
+        if hasattr(model, 'topo_bridge') and model.topo_bridge is not None:
+            model.topo_bridge.to('cpu')
+            print("  TopoBridge moved to CPU (bypass_llm=True)")
         phase_a_tasks = phase_a.get("tasks", ["diverse", "bfs", "hodge_class", "spectral_gap"])
         phase_a_epochs = phase_a.get("epochs", tc["epochs"])
 
@@ -175,26 +274,40 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml"):
         for task in phase_a_tasks:
             task_classes = get_max_classes(task)
             print(f"\n  Task: {task} ({task_classes} classes)")
-            train_ds = BenchmarkDataset(
-                bc.get("num_train", 500), task, train_n, emb_dim,
+            train_ds = _load_or_generate(
+                pregen_dir, task, "train",
+                bc.get("num_train", 500), train_n, emb_dim,
+                topologies=all_topos, n_nodes_range=train_range,
             )
-            val_ds = BenchmarkDataset(
-                bc.get("num_val", 100), task, train_n, emb_dim,
+            val_ds = _load_or_generate(
+                pregen_dir, task, "val",
+                bc.get("num_val", 100), train_n, emb_dim,
+                topologies=all_topos, n_nodes_range=train_range,
             )
 
-            optimizer = torch.optim.AdamW(
-                model.parameters(), lr=tc["learning_rate"],
+            # Phase A: freeze LLM, full LR for GNN/TAT core
+            optimizer = _build_optimizer(
+                model, lr=tc["learning_rate"],
                 weight_decay=tc.get("weight_decay", 0.01),
+                freeze_llm=True,
+            )
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, patience=3, factor=0.5,
             )
 
             best_val_acc = 0.0
+            patience_counter = 0
+            patience = tc.get("patience", 10)
+            best_state = None
             for epoch in range(phase_a_epochs):
                 t0 = time.time()
                 loss, gate_loss, gn = train_epoch_with_gate_penalty(
                     model, train_ds, optimizer,
                     gate_penalty_weight=gate_penalty,
                     label_smoothing=tc.get("label_smoothing", 0.1),
+                    accumulation_steps=tc.get("accumulation_steps", 4),
                     device=device,
+                    scaler=scaler,
                 )
                 # Quick eval
                 from src.benchmarks.run_comparison import evaluate
@@ -204,12 +317,38 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml"):
                 marker = ""
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
+                    best_state = copy.deepcopy(model.state_dict())
+                    patience_counter = 0
                     marker = " *"
+                else:
+                    patience_counter += 1
 
+                cur_lr = optimizer.param_groups[0]['lr']
                 print(f"    Ep {epoch:3d} | loss {loss:.4f} gate_loss {gate_loss:.4f} | "
-                      f"val {val_acc:.3f} | gn {gn:.2f} | {elapsed:.0f}s{marker}")
+                      f"val {val_acc:.3f} | gn {gn:.2f} | lr {cur_lr:.6f} | {elapsed:.0f}s{marker}")
+                scheduler.step(val_loss)
 
+                if best_val_acc >= 1.0 - 1e-6:
+                    print(f"    Early stop: perfect val accuracy at epoch {epoch}")
+                    break
+                if patience_counter >= patience:
+                    print(f"    Early stop: no improvement for {patience} epochs")
+                    break
+
+            if best_state is not None:
+                model.load_state_dict(best_state)
             all_results[f"phase_a_{task}"] = {"best_val_acc": best_val_acc}
+
+            ckpt_path = checkpoint_dir / f"phase_a_{task}.pt"
+            torch.save(model.state_dict(), ckpt_path)
+            print(f"    Checkpoint saved: {ckpt_path}")
+
+        # Unfreeze LLM params and enable TopoBridge for Phase B/C
+        model.bypass_llm = False
+        if hasattr(model, 'topo_bridge') and model.topo_bridge is not None:
+            model.topo_bridge.to(device)
+            print("  TopoBridge moved back to GPU")
+        _unfreeze_llm(model)
 
     # ---- Phase B: Graph Completion ----
     phase_b = cc.get("phase_b", {})
@@ -219,41 +358,78 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml"):
         print(f"{'─' * 72}")
 
         phase_b_epochs = phase_b.get("epochs", tc["epochs"])
+        phase_b_tasks = phase_b.get("tasks", ["graph_completion"])
 
-        train_ds = BenchmarkDataset(
-            bc.get("num_train", 500), "graph_completion", train_n, emb_dim,
-        )
-        val_ds = BenchmarkDataset(
-            bc.get("num_val", 100), "graph_completion", train_n, emb_dim,
-        )
-
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=tc["learning_rate"] * 0.5,
-            weight_decay=tc.get("weight_decay", 0.01),
-        )
-
-        best_val_acc = 0.0
-        for epoch in range(phase_b_epochs):
-            t0 = time.time()
-            loss, _, gn = train_epoch_with_gate_penalty(
-                model, train_ds, optimizer,
-                gate_penalty_weight=0.0,
-                label_smoothing=tc.get("label_smoothing", 0.1),
-                device=device,
+        for task in phase_b_tasks:
+            task_classes = get_max_classes(task)
+            print(f"\n  Task: {task} ({task_classes} classes)")
+            train_ds = _load_or_generate(
+                pregen_dir, task, "train",
+                bc.get("num_train", 500), train_n, emb_dim,
+                topologies=all_topos, n_nodes_range=train_range,
             )
-            from src.benchmarks.run_comparison import evaluate
-            val_acc, val_loss = evaluate(model, val_ds, device=device)
-            elapsed = time.time() - t0
+            val_ds = _load_or_generate(
+                pregen_dir, task, "val",
+                bc.get("num_val", 100), train_n, emb_dim,
+                topologies=all_topos, n_nodes_range=train_range,
+            )
 
-            marker = ""
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                marker = " *"
+            # Phase B: differential LR, LLM unfrozen
+            optimizer = _build_optimizer(
+                model, lr=tc["learning_rate"] * 0.5,
+                weight_decay=tc.get("weight_decay", 0.01),
+                llm_lr_scale=0.5, freeze_llm=False,
+            )
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, patience=3, factor=0.5,
+            )
 
-            print(f"    Ep {epoch:3d} | loss {loss:.4f} | "
-                  f"val {val_acc:.3f} | gn {gn:.2f} | {elapsed:.0f}s{marker}")
+            best_val_acc = 0.0
+            patience_counter = 0
+            patience = tc.get("patience", 10)
+            best_state = None
+            for epoch in range(phase_b_epochs):
+                t0 = time.time()
+                loss, _, gn = train_epoch_with_gate_penalty(
+                    model, train_ds, optimizer,
+                    gate_penalty_weight=0.0,
+                    label_smoothing=tc.get("label_smoothing", 0.1),
+                    accumulation_steps=tc.get("accumulation_steps", 4),
+                    device=device,
+                    scaler=scaler,
+                )
+                from src.benchmarks.run_comparison import evaluate
+                val_acc, val_loss = evaluate(model, val_ds, device=device)
+                elapsed = time.time() - t0
 
-        all_results["phase_b_graph_completion"] = {"best_val_acc": best_val_acc}
+                marker = ""
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    best_state = copy.deepcopy(model.state_dict())
+                    patience_counter = 0
+                    marker = " *"
+                else:
+                    patience_counter += 1
+
+                cur_lr = optimizer.param_groups[0]['lr']
+                print(f"    Ep {epoch:3d} | loss {loss:.4f} | "
+                      f"val {val_acc:.3f} | gn {gn:.2f} | lr {cur_lr:.6f} | {elapsed:.0f}s{marker}")
+                scheduler.step(val_loss)
+
+                if best_val_acc >= 1.0 - 1e-6:
+                    print(f"    Early stop: perfect val accuracy at epoch {epoch}")
+                    break
+                if patience_counter >= patience:
+                    print(f"    Early stop: no improvement for {patience} epochs")
+                    break
+
+            if best_state is not None:
+                model.load_state_dict(best_state)
+            all_results[f"phase_b_{task}"] = {"best_val_acc": best_val_acc}
+
+            ckpt_path = checkpoint_dir / f"phase_b_{task}.pt"
+            torch.save(model.state_dict(), ckpt_path)
+            print(f"    Checkpoint saved: {ckpt_path}")
 
     # ---- Phase C: Language + Analogy ----
     phase_c = cc.get("phase_c", {})
@@ -270,26 +446,40 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml"):
         for task in phase_c_tasks:
             task_classes = get_max_classes(task)
             print(f"\n  Task: {task} ({task_classes} classes)")
-            train_ds = BenchmarkDataset(
-                bc.get("num_train", 500), task, train_n, emb_dim,
+            train_ds = _load_or_generate(
+                pregen_dir, task, "train",
+                bc.get("num_train", 500), train_n, emb_dim,
+                topologies=all_topos, n_nodes_range=train_range,
             )
-            val_ds = BenchmarkDataset(
-                bc.get("num_val", 100), task, train_n, emb_dim,
+            val_ds = _load_or_generate(
+                pregen_dir, task, "val",
+                bc.get("num_val", 100), train_n, emb_dim,
+                topologies=all_topos, n_nodes_range=train_range,
             )
 
-            optimizer = torch.optim.AdamW(
-                model.parameters(), lr=tc["learning_rate"] * 0.25,
+            # Phase C: lower LR for fine-tuning, differential for LLM
+            optimizer = _build_optimizer(
+                model, lr=tc["learning_rate"] * 0.25,
                 weight_decay=tc.get("weight_decay", 0.01),
+                llm_lr_scale=1.0, freeze_llm=False,
+            )
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, patience=3, factor=0.5,
             )
 
             best_val_acc = 0.0
+            patience_counter = 0
+            patience = tc.get("patience", 10)
+            best_state = None
             for epoch in range(phase_c_epochs):
                 t0 = time.time()
                 loss, _, gn = train_epoch_with_gate_penalty(
                     model, train_ds, optimizer,
                     gate_penalty_weight=0.0,
                     label_smoothing=tc.get("label_smoothing", 0.1),
+                    accumulation_steps=tc.get("accumulation_steps", 4),
                     device=device,
+                    scaler=scaler,
                 )
                 from src.benchmarks.run_comparison import evaluate
                 val_acc, val_loss = evaluate(model, val_ds, device=device)
@@ -298,12 +488,31 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml"):
                 marker = ""
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
+                    best_state = copy.deepcopy(model.state_dict())
+                    patience_counter = 0
                     marker = " *"
+                else:
+                    patience_counter += 1
 
+                cur_lr = optimizer.param_groups[0]['lr']
                 print(f"    Ep {epoch:3d} | loss {loss:.4f} | "
-                      f"val {val_acc:.3f} | gn {gn:.2f} | {elapsed:.0f}s{marker}")
+                      f"val {val_acc:.3f} | gn {gn:.2f} | lr {cur_lr:.6f} | {elapsed:.0f}s{marker}")
+                scheduler.step(val_loss)
 
+                if best_val_acc >= 1.0 - 1e-6:
+                    print(f"    Early stop: perfect val accuracy at epoch {epoch}")
+                    break
+                if patience_counter >= patience:
+                    print(f"    Early stop: no improvement for {patience} epochs")
+                    break
+
+            if best_state is not None:
+                model.load_state_dict(best_state)
             all_results[f"phase_c_{task}"] = {"best_val_acc": best_val_acc}
+
+            ckpt_path = checkpoint_dir / f"phase_c_{task}.pt"
+            torch.save(model.state_dict(), ckpt_path)
+            print(f"    Checkpoint saved: {ckpt_path}")
 
     # ---- Diagnostics ----
     print(f"\n{'─' * 72}")
@@ -312,7 +521,10 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml"):
 
     diag_tasks = ["diverse", "graph_completion", "labeled_reasoning"]
     for task in diag_tasks:
-        ds = BenchmarkDataset(50, task, train_n, emb_dim)
+        ds = _load_or_generate(
+            pregen_dir, task, "val", 50, train_n, emb_dim,
+            topologies=all_topos, n_nodes_range=train_range,
+        )
         collector = DiagnosticCollector()
         collector.collect(model, ds, device)
         summary = collector.summarize()
@@ -338,5 +550,7 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Phase 4c curriculum training")
     parser.add_argument("config", nargs="?", default="config/benchmark_4c_llm.yaml")
+    parser.add_argument("--pregenerated-dir", default=None,
+                        help="Load pre-generated datasets from this directory")
     args = parser.parse_args()
-    run_curriculum(args.config)
+    run_curriculum(args.config, pregenerated_dir=args.pregenerated_dir)

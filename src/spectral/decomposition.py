@@ -30,6 +30,8 @@ def spectral_decomposition(
     else:
         raise ValueError(f"dim={dim} not supported")
 
+    # eigh doesn't support fp16 — ensure float32
+    L = L.float()
     eigenvalues, eigenvectors = torch.linalg.eigh(L)
 
     if normalize:
@@ -68,8 +70,10 @@ def hodge_decomposition(
     if dim > 0:
         B = cc.boundary_operator(dim)  # shape: (num_{k-1}_cells, num_k_cells)
         Bs = B @ signal  # (num_{k-1},)
-        # Solve (B @ B^T) x = B @ signal  via least-squares
-        x = torch.linalg.lstsq(B @ B.T, Bs.unsqueeze(-1)).solution.squeeze(-1)
+        # Solve (B @ B^T) x = B @ signal  via least-squares (fp32 for stability)
+        x = torch.linalg.lstsq(
+            (B @ B.T).float(), Bs.unsqueeze(-1).float(),
+        ).solution.squeeze(-1).to(signal.dtype)
         gradient = B.T @ x
     else:
         gradient = torch.zeros_like(signal)
@@ -78,8 +82,10 @@ def hodge_decomposition(
     if cc.num_cells(dim + 1) > 0:
         B_up = cc.boundary_operator(dim + 1)  # shape: (num_k_cells, num_{k+1}_cells)
         BupTs = B_up.T @ signal  # (num_{k+1},)
-        # Solve (B_up^T @ B_up) x = B_up^T @ signal  via least-squares
-        x = torch.linalg.lstsq(B_up.T @ B_up, BupTs.unsqueeze(-1)).solution.squeeze(-1)
+        # Solve (B_up^T @ B_up) x = B_up^T @ signal  via least-squares (fp32)
+        x = torch.linalg.lstsq(
+            (B_up.T @ B_up).float(), BupTs.unsqueeze(-1).float(),
+        ).solution.squeeze(-1).to(signal.dtype)
         curl = B_up @ x
     else:
         curl = torch.zeros_like(signal)
