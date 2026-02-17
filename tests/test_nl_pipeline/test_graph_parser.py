@@ -54,6 +54,32 @@ class TestMockGraphParser:
         assert spec.query_node in {n.name for n in spec.nodes}
 
 
+class TestMockParserTopologyInference:
+    def test_sets_topology_hint_ba(self):
+        parser = MockGraphParser()
+        spec = parser.parse("what happens when the central hub fails in the network")
+        assert spec.topology_hint == "ba"
+        assert spec.topology_confidence > 0.3
+        assert spec.node_roles is not None
+
+    def test_no_topology_for_generic(self):
+        parser = MockGraphParser()
+        spec = parser.parse("tell me about foo and bar")
+        assert spec.topology_hint is None
+
+    def test_tree_topology(self):
+        parser = MockGraphParser()
+        spec = parser.parse(
+            "how does information flow through the hierarchy from parent to child"
+        )
+        assert spec.topology_hint == "tree"
+
+    def test_community_topology(self):
+        parser = MockGraphParser()
+        spec = parser.parse("how do clusters communicate between departments")
+        assert spec.topology_hint == "sbm"
+
+
 class TestGraphExtractionPrompt:
     def test_prompt_contains_examples(self):
         assert "nodes" in GRAPH_EXTRACTION_PROMPT

@@ -4,6 +4,7 @@ import re
 from abc import ABC, abstractmethod
 
 from src.nl_pipeline.data_types import NodeSpec, EdgeSpec, GraphSpec
+from src.nl_pipeline.topology_inferrer import TopologyInferrer
 
 GRAPH_EXTRACTION_PROMPT = '''You extract graph structure from questions. Output valid JSON only.
 
@@ -76,6 +77,9 @@ class MockGraphParser(BaseGraphParser):
         "tell", "can", "could", "would", "should", "will",
     })
 
+    def __init__(self):
+        self._topology_inferrer = TopologyInferrer()
+
     def parse(self, query: str) -> GraphSpec:
         words = re.findall(r'\b[a-z]{3,}\b', query.lower())
         keywords = [w for w in words if w not in self._STOP_WORDS]
@@ -113,13 +117,21 @@ class MockGraphParser(BaseGraphParser):
         elif any(n.name in bio_words for n in nodes):
             domain = "biology"
 
-        return GraphSpec(
+        spec = GraphSpec(
             nodes=nodes,
             edges=edges,
             query_node=nodes[0].name,
             target_node=nodes[-1].name if len(nodes) > 1 else None,
             domain=domain,
         )
+
+        # Infer topology from NL semantics
+        hint = self._topology_inferrer.infer(spec, query)
+        spec.topology_hint = hint.topology
+        spec.topology_confidence = hint.confidence
+        spec.node_roles = hint.node_roles if hint.node_roles else None
+
+        return spec
 
 
 class GraphParser(BaseGraphParser):
@@ -133,6 +145,7 @@ class GraphParser(BaseGraphParser):
         model=None,
     ):
         self._fallback = MockGraphParser()
+        self._topology_inferrer = TopologyInferrer()
         self._model_name = model_name
         self._device = device
         self._tokenizer = tokenizer
@@ -182,5 +195,10 @@ class GraphParser(BaseGraphParser):
         )
         spec = parse_graph_json(response)
         if spec is not None:
+            # Enrich with topology inference
+            hint = self._topology_inferrer.infer(spec, query)
+            spec.topology_hint = hint.topology
+            spec.topology_confidence = hint.confidence
+            spec.node_roles = hint.node_roles if hint.node_roles else None
             return spec
         return self._fallback.parse(query)
