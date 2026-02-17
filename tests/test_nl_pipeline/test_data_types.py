@@ -1,6 +1,6 @@
 """Tests for Phase 5 NL pipeline data structures."""
 from src.nl_pipeline.data_types import (
-    NodeSpec, EdgeSpec, GraphSpec, TaskRoute, NLResult,
+    NodeSpec, EdgeSpec, GraphSpec, TaskRoute, NLResult, TopologyHint,
 )
 
 class TestNodeSpec:
@@ -51,6 +51,51 @@ class TestTaskRoute:
         )
         assert route.task_type == "bfs"
         assert route.max_classes == 16
+
+class TestTopologyHint:
+    def test_creation(self):
+        hint = TopologyHint(topology="ba", confidence=0.85, node_roles={"hub": "hub"})
+        assert hint.topology == "ba"
+        assert hint.confidence == 0.85
+        assert hint.node_roles == {"hub": "hub"}
+        assert hint.properties == {}
+
+    def test_none_topology(self):
+        hint = TopologyHint(topology=None, confidence=0.0)
+        assert hint.topology is None
+        assert hint.node_roles == {}
+
+    def test_with_properties(self):
+        hint = TopologyHint(
+            topology="sbm", confidence=0.7,
+            node_roles={"a": "member"},
+            properties={"num_communities": 3},
+        )
+        assert hint.properties["num_communities"] == 3
+
+
+class TestGraphSpecTopology:
+    def test_backward_compat(self):
+        """Existing GraphSpec creation works without new fields."""
+        spec = GraphSpec(
+            nodes=[NodeSpec(name="a", type="entity")],
+            edges=[], query_node="a", target_node=None, domain="general",
+        )
+        assert spec.topology_hint is None
+        assert spec.topology_confidence == 0.0
+        assert spec.node_roles is None
+
+    def test_with_topology(self):
+        spec = GraphSpec(
+            nodes=[NodeSpec(name="hub", type="entity")],
+            edges=[], query_node="hub", target_node=None, domain="technology",
+            topology_hint="ba", topology_confidence=0.85,
+            node_roles={"hub": "hub"},
+        )
+        assert spec.topology_hint == "ba"
+        assert spec.topology_confidence == 0.85
+        assert spec.node_roles == {"hub": "hub"}
+
 
 class TestNLResult:
     def test_creation(self):

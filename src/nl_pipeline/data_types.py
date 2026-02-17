@@ -18,6 +18,15 @@ class EdgeSpec:
 
 
 @dataclass
+class TopologyHint:
+    """Inferred graph topology from NL query."""
+    topology: str | None      # ba, ws, sbm, grid, tree, ladder, caveman, er
+    confidence: float         # 0.0 to 1.0
+    node_roles: dict[str, str] = field(default_factory=dict)  # name → role
+    properties: dict = field(default_factory=dict)
+
+
+@dataclass
 class GraphSpec:
     """Complete graph structure extracted from a natural language query."""
     nodes: list[NodeSpec]
@@ -25,6 +34,9 @@ class GraphSpec:
     query_node: str
     target_node: str | None
     domain: str
+    topology_hint: str | None = None
+    topology_confidence: float = 0.0
+    node_roles: dict[str, str] | None = None
 
 
 @dataclass
