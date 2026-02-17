@@ -86,3 +86,66 @@ class TestSingleNode:
         cc, node_map = builder.build(spec)
         assert cc.num_cells(0) == 1
         assert cc.num_cells(1) == 0
+
+
+class TestTopologyAwareBuilding:
+    def test_ba_topology_generates_larger_graph(self, builder):
+        spec = GraphSpec(
+            nodes=[NodeSpec("hub", "entity"), NodeSpec("client_a", "entity"),
+                   NodeSpec("client_b", "entity")],
+            edges=[EdgeSpec("hub", "client_a", "connects")],
+            query_node="hub", target_node="client_a", domain="technology",
+            topology_hint="ba", topology_confidence=0.8,
+            node_roles={"hub": "hub", "client_a": "leaf", "client_b": "leaf"},
+        )
+        cc, name_to_cc = builder.build(spec)
+        # BA with min_size=8 should produce >= 8 nodes
+        assert cc.num_cells(0) >= 8
+        # All named nodes mapped
+        assert "hub" in name_to_cc
+        assert "client_a" in name_to_cc
+        assert "client_b" in name_to_cc
+
+    def test_tree_topology_generates_tree(self, builder):
+        spec = GraphSpec(
+            nodes=[NodeSpec("root", "entity"), NodeSpec("leaf", "entity")],
+            edges=[], query_node="root", target_node="leaf", domain="general",
+            topology_hint="tree", topology_confidence=0.7,
+            node_roles={"root": "root", "leaf": "leaf"},
+        )
+        cc, name_to_cc = builder.build(spec)
+        assert cc.num_cells(0) >= 8
+        assert "root" in name_to_cc
+        assert "leaf" in name_to_cc
+
+    def test_fallback_no_topology(self, builder):
+        """Without topology hint, builds from edges (original behavior)."""
+        spec = GraphSpec(
+            nodes=[NodeSpec("a", "entity"), NodeSpec("b", "entity")],
+            edges=[EdgeSpec("a", "b", "connects")],
+            query_node="a", target_node="b", domain="general",
+        )
+        cc, name_to_cc = builder.build(spec)
+        assert cc.num_cells(0) == 2  # Only parsed nodes
+
+    def test_low_confidence_uses_fallback(self, builder):
+        """Low confidence should fall back to edge-based construction."""
+        spec = GraphSpec(
+            nodes=[NodeSpec("x", "entity"), NodeSpec("y", "entity")],
+            edges=[EdgeSpec("x", "y", "connects")],
+            query_node="x", target_node="y", domain="general",
+            topology_hint="ba", topology_confidence=0.2,  # below threshold
+        )
+        cc, _ = builder.build(spec)
+        assert cc.num_cells(0) == 2  # fallback
+
+    def test_sbm_produces_connected_graph(self, builder):
+        spec = GraphSpec(
+            nodes=[NodeSpec("team_a", "entity"), NodeSpec("team_b", "entity")],
+            edges=[], query_node="team_a", target_node="team_b", domain="general",
+            topology_hint="sbm", topology_confidence=0.9,
+            node_roles={"team_a": "member", "team_b": "member"},
+        )
+        cc, name_to_cc = builder.build(spec)
+        assert cc.num_cells(0) >= 9  # min SBM size
+        assert cc.num_cells(1) > 0  # has edges
