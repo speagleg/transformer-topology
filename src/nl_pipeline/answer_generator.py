@@ -7,6 +7,16 @@ Phase 5b: Llama-based generation with LoRA adapter.
 
 from src.nl_pipeline.data_types import GraphSpec, TaskRoute
 
+TOPOLOGY_DESCRIPTIONS = {
+    "ba": "hub-spoke network",
+    "tree": "hierarchical tree",
+    "sbm": "community-structured network",
+    "ws": "small-world network",
+    "grid": "grid structure",
+    "ladder": "dual-path ladder",
+    "caveman": "densely clustered network",
+    "er": "random network",
+}
 
 # Maps (task_type, class_idx) → interpretation string
 CLASS_INTERPRETATIONS = {
@@ -79,10 +89,15 @@ class AnswerGenerator:
         """
         interpreter = CLASS_INTERPRETATIONS.get(task_route.task_type)
         if interpreter is not None:
-            return interpreter(class_idx, graph_spec)
+            base = interpreter(class_idx, graph_spec)
+        else:
+            base = (
+                f"The model predicted class {class_idx} for task "
+                f"'{task_route.task_type}' on the query: {original_query}"
+            )
 
-        # Fallback for unknown task types
-        return (
-            f"The model predicted class {class_idx} for task "
-            f"'{task_route.task_type}' on the query: {original_query}"
-        )
+        # Prefix with topology context when available
+        if graph_spec.topology_hint and graph_spec.topology_confidence >= 0.3:
+            desc = TOPOLOGY_DESCRIPTIONS.get(graph_spec.topology_hint, "network")
+            return f"In the {desc}: {base}"
+        return base

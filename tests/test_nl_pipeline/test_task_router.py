@@ -81,6 +81,59 @@ class TestDefaultRouting:
         assert route.task_type == "diverse"
 
 
+class TestTopologyAffinity:
+    def test_tree_topology_routes_to_bfs(self, router):
+        spec = GraphSpec(
+            nodes=[NodeSpec("a", "node"), NodeSpec("b", "node")],
+            edges=[EdgeSpec("a", "b", "connects")],
+            query_node="a", target_node="b", domain="test",
+            topology_hint="tree", topology_confidence=0.8,
+        )
+        route = router.route(spec, "what is the structure of this hierarchy")
+        assert route.task_type == "bfs"
+
+    def test_ba_topology_routes_to_spectral(self, router):
+        spec = GraphSpec(
+            nodes=[NodeSpec("hub", "node"), NodeSpec("spoke", "node")],
+            edges=[EdgeSpec("hub", "spoke", "connects")],
+            query_node="hub", target_node="spoke", domain="test",
+            topology_hint="ba", topology_confidence=0.7,
+        )
+        route = router.route(spec, "tell me about this network")
+        assert route.task_type == "spectral_gap"
+
+    def test_topology_hint_in_metadata(self, router):
+        spec = GraphSpec(
+            nodes=[NodeSpec("a", "node"), NodeSpec("b", "node")],
+            edges=[EdgeSpec("a", "b", "connects")],
+            query_node="a", target_node="b", domain="test",
+            topology_hint="ba", topology_confidence=0.8,
+        )
+        route = router.route(spec, "tell me about this network")
+        assert route.metadata.get("topology_hint") == "ba"
+
+    def test_low_confidence_falls_through(self, router):
+        spec = GraphSpec(
+            nodes=[NodeSpec("a", "node"), NodeSpec("b", "node")],
+            edges=[EdgeSpec("a", "b", "connects")],
+            query_node="a", target_node="b", domain="test",
+            topology_hint="tree", topology_confidence=0.1,
+        )
+        route = router.route(spec, "tell me about this")
+        assert route.task_type == "diverse"
+
+    def test_keyword_takes_priority_over_topology(self, router):
+        spec = GraphSpec(
+            nodes=[NodeSpec("a", "node"), NodeSpec("b", "node")],
+            edges=[EdgeSpec("a", "b", "connects")],
+            query_node="a", target_node="b", domain="test",
+            topology_hint="tree", topology_confidence=0.9,
+        )
+        # "cycle" keyword should override tree→bfs affinity
+        route = router.route(spec, "is there a cycle in this tree")
+        assert route.task_type == "cycle_detection"
+
+
 class TestRouteMetadata:
     def test_route_has_correct_max_classes(self, router):
         spec = _make_spec()

@@ -95,6 +95,46 @@ class TestAnswerGenerator:
         assert isinstance(answer, str)
         assert len(answer) > 0
 
+    def test_topology_context_in_answer(self, gen):
+        spec = GraphSpec(
+            nodes=[NodeSpec("hub", "entity"), NodeSpec("client", "entity")],
+            edges=[EdgeSpec("hub", "client", "connects")],
+            query_node="hub", target_node="client", domain="technology",
+            topology_hint="ba", topology_confidence=0.8,
+        )
+        answer = gen.generate(
+            class_idx=3,
+            task_route=_make_route("bfs", 16),
+            graph_spec=spec,
+            original_query="how far is hub from client",
+        )
+        assert "hub-spoke" in answer.lower()
+
+    def test_no_topology_context_when_none(self, gen):
+        answer = gen.generate(
+            class_idx=3,
+            task_route=_make_route("bfs", 16),
+            graph_spec=_make_spec(),
+            original_query="how far is server from database",
+        )
+        assert "hub-spoke" not in answer.lower()
+        assert "hierarchical" not in answer.lower()
+
+    def test_topology_context_tree(self, gen):
+        spec = GraphSpec(
+            nodes=[NodeSpec("root", "entity"), NodeSpec("leaf", "entity")],
+            edges=[],
+            query_node="root", target_node="leaf", domain="general",
+            topology_hint="tree", topology_confidence=0.7,
+        )
+        answer = gen.generate(
+            class_idx=2,
+            task_route=_make_route("bfs", 16),
+            graph_spec=spec,
+            original_query="how deep is the tree",
+        )
+        assert "hierarchical tree" in answer.lower()
+
     def test_answer_includes_node_names(self, gen):
         answer = gen.generate(
             class_idx=3,
