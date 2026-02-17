@@ -51,6 +51,7 @@ def nx_to_cell_complex(
     # Precompute structural features
     degrees = dict(G.degree())
     max_degree = max(degrees.values()) if degrees else 1
+    max_degree = max(max_degree, 1)  # guard against all-isolated-node graphs
     clustering = nx.clustering(G)
 
     # BFS distances from source (if provided)
