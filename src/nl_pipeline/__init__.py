@@ -19,9 +19,11 @@ from src.nl_pipeline.data_types import (
     GraphSpec,
     TaskRoute,
     NLResult,
+    TopologyHint,
 )
 from src.nl_pipeline.pipeline import NLReasoningPipeline, load_frozen_model
 from src.nl_pipeline.graph_parser import MockGraphParser, GraphParser
 from src.nl_pipeline.task_router import TaskRouter
 from src.nl_pipeline.cell_complex_builder import CellComplexBuilder
 from src.nl_pipeline.answer_generator import AnswerGenerator
+from src.nl_pipeline.topology_inferrer import TopologyInferrer
