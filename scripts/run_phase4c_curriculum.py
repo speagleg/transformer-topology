@@ -154,7 +154,9 @@ def train_epoch_with_gate_penalty(
     n = len(dataset)
     avg_loss = total_loss / n
     avg_gate_loss = total_gate_loss / n
-    avg_grad_norm = sum(grad_norms) / len(grad_norms) if grad_norms else 0.0
+    # Filter NaN/inf from grad norms (NaN steps are already skipped above)
+    valid_norms = [g for g in grad_norms if g == g and g != float('inf')]
+    avg_grad_norm = sum(valid_norms) / len(valid_norms) if valid_norms else 0.0
     return avg_loss, avg_gate_loss, avg_grad_norm
 
 
@@ -189,7 +191,8 @@ def _load_or_generate(
 
 
 def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
-                   pregenerated_dir: str | None = None):
+                   pregenerated_dir: str | None = None,
+                   resume_phase: str | None = None):
     """Run the three-phase curriculum training."""
     with open(config_path) as f:
         config = yaml.safe_load(f)
@@ -253,9 +256,34 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
     # making autocast counterproductive (casting overhead > fp16 savings).
     scaler = None
 
+    # ---- Resume from checkpoint if requested ----
+    skip_a = resume_phase in ("b", "B", "c", "C")
+    skip_b = resume_phase in ("c", "C")
+    if skip_a:
+        # Load the last Phase A checkpoint to restore model weights
+        phase_a_tasks = cc.get("phase_a", {}).get("tasks",
+                        ["diverse", "bfs", "hodge_class", "spectral_gap"])
+        last_task = phase_a_tasks[-1]
+        ckpt_path = checkpoint_dir / f"phase_a_{last_task}.pt"
+        if ckpt_path.exists():
+            # Load to CPU first to avoid GPU OOM from fp32 checkpoint + bf16 model
+            state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+            model.load_state_dict(state, strict=False)
+            print(f"  Resumed from checkpoint: {ckpt_path}")
+        else:
+            print(f"  WARNING: {ckpt_path} not found, starting from scratch")
+        # Enable TopoBridge for Phase B/C
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        model.bypass_llm = False
+        if hasattr(model, 'topo_bridge') and model.topo_bridge is not None:
+            model.topo_bridge.to(device)
+            print("  TopoBridge moved to GPU")
+        _unfreeze_llm(model)
+
     # ---- Phase A: Regression Lock ----
     phase_a = cc.get("phase_a", {})
-    if phase_a.get("enabled", True):
+    if phase_a.get("enabled", True) and not skip_a:
         print(f"\n{'─' * 72}")
         print("Phase A: Regression Lock (existing tasks, gate penalty)")
         print(f"{'─' * 72}")
@@ -320,6 +348,9 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
                     best_state = copy.deepcopy(model.state_dict())
                     patience_counter = 0
                     marker = " *"
+                    # Save best checkpoint immediately
+                    best_ckpt = checkpoint_dir / f"phase_a_{task}_best.pt"
+                    torch.save(best_state, best_ckpt)
                 else:
                     patience_counter += 1
 
@@ -327,6 +358,16 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
                 print(f"    Ep {epoch:3d} | loss {loss:.4f} gate_loss {gate_loss:.4f} | "
                       f"val {val_acc:.3f} | gn {gn:.2f} | lr {cur_lr:.6f} | {elapsed:.0f}s{marker}")
                 scheduler.step(val_loss)
+
+                # Rolling checkpoint every epoch (overwrites previous)
+                rolling_ckpt = checkpoint_dir / f"phase_a_{task}_latest.pt"
+                torch.save({
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "epoch": epoch,
+                    "best_val_acc": best_val_acc,
+                    "patience_counter": patience_counter,
+                }, rolling_ckpt)
 
                 if best_val_acc >= 1.0 - 1e-6:
                     print(f"    Early stop: perfect val accuracy at epoch {epoch}")
@@ -343,6 +384,11 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
             torch.save(model.state_dict(), ckpt_path)
             print(f"    Checkpoint saved: {ckpt_path}")
 
+        # Free Phase A memory before loading LLM onto GPU
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+            print(f"  VRAM freed: {torch.cuda.memory_reserved(device) / 1e9:.1f}GB reserved")
+
         # Unfreeze LLM params and enable TopoBridge for Phase B/C
         model.bypass_llm = False
         if hasattr(model, 'topo_bridge') and model.topo_bridge is not None:
@@ -352,7 +398,7 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
 
     # ---- Phase B: Graph Completion ----
     phase_b = cc.get("phase_b", {})
-    if phase_b.get("enabled", True):
+    if phase_b.get("enabled", True) and not skip_b:
         print(f"\n{'─' * 72}")
         print("Phase B: Graph Completion (no gate penalty)")
         print(f"{'─' * 72}")
@@ -408,6 +454,8 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
                     best_state = copy.deepcopy(model.state_dict())
                     patience_counter = 0
                     marker = " *"
+                    best_ckpt = checkpoint_dir / f"phase_b_{task}_best.pt"
+                    torch.save(best_state, best_ckpt)
                 else:
                     patience_counter += 1
 
@@ -415,6 +463,15 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
                 print(f"    Ep {epoch:3d} | loss {loss:.4f} | "
                       f"val {val_acc:.3f} | gn {gn:.2f} | lr {cur_lr:.6f} | {elapsed:.0f}s{marker}")
                 scheduler.step(val_loss)
+
+                rolling_ckpt = checkpoint_dir / f"phase_b_{task}_latest.pt"
+                torch.save({
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "epoch": epoch,
+                    "best_val_acc": best_val_acc,
+                    "patience_counter": patience_counter,
+                }, rolling_ckpt)
 
                 if best_val_acc >= 1.0 - 1e-6:
                     print(f"    Early stop: perfect val accuracy at epoch {epoch}")
@@ -491,6 +548,8 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
                     best_state = copy.deepcopy(model.state_dict())
                     patience_counter = 0
                     marker = " *"
+                    best_ckpt = checkpoint_dir / f"phase_c_{task}_best.pt"
+                    torch.save(best_state, best_ckpt)
                 else:
                     patience_counter += 1
 
@@ -498,6 +557,15 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
                 print(f"    Ep {epoch:3d} | loss {loss:.4f} | "
                       f"val {val_acc:.3f} | gn {gn:.2f} | lr {cur_lr:.6f} | {elapsed:.0f}s{marker}")
                 scheduler.step(val_loss)
+
+                rolling_ckpt = checkpoint_dir / f"phase_c_{task}_latest.pt"
+                torch.save({
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "epoch": epoch,
+                    "best_val_acc": best_val_acc,
+                    "patience_counter": patience_counter,
+                }, rolling_ckpt)
 
                 if best_val_acc >= 1.0 - 1e-6:
                     print(f"    Early stop: perfect val accuracy at epoch {epoch}")
@@ -552,5 +620,8 @@ if __name__ == "__main__":
     parser.add_argument("config", nargs="?", default="config/benchmark_4c_llm.yaml")
     parser.add_argument("--pregenerated-dir", default=None,
                         help="Load pre-generated datasets from this directory")
+    parser.add_argument("--resume-phase", default=None, choices=["b", "B", "c", "C"],
+                        help="Skip earlier phases and resume from B or C (loads last checkpoint)")
     args = parser.parse_args()
-    run_curriculum(args.config, pregenerated_dir=args.pregenerated_dir)
+    run_curriculum(args.config, pregenerated_dir=args.pregenerated_dir,
+                   resume_phase=args.resume_phase)

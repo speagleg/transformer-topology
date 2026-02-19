@@ -492,10 +492,16 @@ class SheafWaveDynamics(nn.Module):
             maps = maps_flat.view(2, r, d)  # (2, rank, d)
 
             # Spectral normalization — constrain max singular value ≤ scale
+            # Detach SVD to avoid NaN gradients from near-degenerate singular values.
+            # Gradient flows through maps before normalization via straight-through.
             for i in range(2):
-                U, S, Vh = torch.linalg.svd(maps[i].float(), full_matrices=False)
-                S = S.clamp(max=1.0)
-                maps[i] = U @ torch.diag(S) @ Vh
+                with torch.no_grad():
+                    U, S, Vh = torch.linalg.svd(maps[i].float(), full_matrices=False)
+                    S_clamped = S.clamp(max=1.0)
+                    # Compute scaling factor per-row: only rescale if S > 1
+                    scale_factors = S_clamped / S.clamp(min=1e-8)
+                # Apply scaling in a differentiable way (straight-through estimator)
+                maps[i] = maps[i] * scale_factors.unsqueeze(-1)
             maps = maps * scale
 
             F_eu = maps[0]  # (rank, d)
@@ -513,34 +519,34 @@ class SheafWaveDynamics(nn.Module):
         # Symmetrize first
         L = (L + L.T) / 2
 
-        # For small graphs, use exact eigendecomposition for stability
+        # Normalize Laplacian for stability.
+        # Use detached normalization factor to avoid NaN gradients from
+        # eigh/power-iteration backward (1/(λ_i - λ_j) blows up for
+        # repeated eigenvalues, common in graph Laplacians).
         nd = n * d
-        if nd <= 512:
-            try:
-                eigenvalues, eigenvectors = torch.linalg.eigh(L.float())
-                # Enforce positive semi-definiteness: clamp negative eigenvalues
-                eigenvalues = eigenvalues.clamp(min=0)
-                # Normalize by largest eigenvalue
-                lam_max = eigenvalues.max().clamp(min=1e-8)
-                eigenvalues = eigenvalues / lam_max
-                L = eigenvectors @ torch.diag(eigenvalues) @ eigenvectors.T
-            except Exception:
-                # Fallback: just normalize by Frobenius norm
-                L = L / L.norm().clamp(min=1e-8)
-        else:
-            # Large graphs: power iteration (existing approach)
-            v = torch.randn(nd, device=device)
-            v = v / v.norm()
-            for _ in range(15):
-                v = L @ v
-                v_norm = v.norm()
-                if v_norm < 1e-8:
-                    break
-                v = v / v_norm
-            lam_max = (v @ L @ v).clamp(min=1e-8)
-            L = L / lam_max
-            # Symmetrize again after normalization
-            L = (L + L.T) / 2
+        with torch.no_grad():
+            lam_max = torch.tensor(1.0, device=device)
+            if nd <= 512:
+                try:
+                    eigenvalues = torch.linalg.eigvalsh(L.float())
+                    eigenvalues = eigenvalues.clamp(min=0)
+                    lam_max = eigenvalues.max().clamp(min=1e-8)
+                except Exception:
+                    lam_max = L.norm().clamp(min=1e-8)
+            else:
+                v = torch.randn(nd, device=device)
+                v = v / v.norm()
+                for _ in range(15):
+                    v = L @ v
+                    v_norm = v.norm()
+                    if v_norm < 1e-8:
+                        break
+                    v = v / v_norm
+                lam_max = (v @ L @ v).clamp(min=1e-8)
+        # Differentiable scaling by detached normalization constant
+        L = L / lam_max
+        # Symmetrize after normalization
+        L = (L + L.T) / 2
 
         # Early NaN guard
         if torch.isnan(L).any():

@@ -55,9 +55,10 @@ class LlamaBackend(nn.Module, BaseLLMBackend):
     """Llama 3.2 1B/3B backend with frozen weights, cross-attention, and LoRA.
 
     Architecture:
-    - Frozen Llama base model
+    - Frozen Llama base model (bf16 for memory efficiency)
     - TopoCrossAttention inserted after self-attention at cross_attn_layer
     - LoRA adapters on Q/V projections at the cross-attention layer
+    - Gradient checkpointing to reduce activation memory
 
     Requires transformers and peft packages.
     """
@@ -88,10 +89,10 @@ class LlamaBackend(nn.Module, BaseLLMBackend):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Load frozen model
+        # Load frozen model in bf16 to halve memory footprint
         self.llama = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float32,
+            torch_dtype=torch.bfloat16,
             device_map=None,
         )
         for param in self.llama.parameters():
@@ -112,14 +113,36 @@ class LlamaBackend(nn.Module, BaseLLMBackend):
             )
             self.llama = get_peft_model(self.llama, lora_config)
 
+        # Enable gradient checkpointing to reduce activation memory.
+        # _topo_memory is NOT cleared after forward() so recomputation
+        # during backward produces identical tensors.
+        self.llama.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+
         # Store for use in forward hook
         self._topo_memory = None
         self._register_cross_attn_hook()
 
+    def _get_decoder_layers(self):
+        """Navigate model hierarchy to find decoder layers (handles PEFT wrapping)."""
+        # Try common paths: unwrapped, PEFT-wrapped, nested
+        for path in [
+            lambda: self.llama.model.model.layers,      # PeftModel → CausalLM → LlamaModel
+            lambda: self.llama.model.layers,             # CausalLM → LlamaModel (no PEFT)
+            lambda: self.llama.base_model.model.model.layers,  # older PEFT structure
+        ]:
+            try:
+                layers = path()
+                if hasattr(layers, '__getitem__'):
+                    return layers
+            except AttributeError:
+                continue
+        raise AttributeError("Cannot find decoder layers in model hierarchy")
+
     def _register_cross_attn_hook(self):
         """Register a forward hook on the target layer to inject cross-attention."""
-        layers = self.llama.model.layers if hasattr(self.llama, 'model') else \
-                 self.llama.base_model.model.model.layers
+        layers = self._get_decoder_layers()
         target_layer = layers[self.cross_attn_layer]
 
         def hook(module, input, output):
@@ -128,9 +151,16 @@ class LlamaBackend(nn.Module, BaseLLMBackend):
             # output is typically (hidden_states, ...) or just hidden_states
             if isinstance(output, tuple):
                 hidden = output[0]
-                hidden = self.topo_cross_attn(hidden, self._topo_memory)
+            else:
+                hidden = output
+            # Cross-attn is fp32 for stability; cast bf16→fp32→bf16
+            orig_dtype = hidden.dtype
+            hidden = self.topo_cross_attn(
+                hidden.float(), self._topo_memory.float()
+            ).to(orig_dtype)
+            if isinstance(output, tuple):
                 return (hidden,) + output[1:]
-            return self.topo_cross_attn(output, self._topo_memory)
+            return hidden
 
         target_layer.register_forward_hook(hook)
 
@@ -169,8 +199,12 @@ class LlamaBackend(nn.Module, BaseLLMBackend):
         prefix_3d = prefix_tokens.unsqueeze(0)  # (1, K, hidden_dim)
         input_embeds = torch.cat([prefix_3d, text_embeds], dim=1)  # (1, K+text_len, hidden_dim)
 
-        # Set topo_memory for cross-attention hook
-        self._topo_memory = topo_memory.unsqueeze(0)  # (1, N, hidden_dim)
+        # Cast to model dtype (bf16) if needed — TopoBridge outputs fp32
+        model_dtype = next(self.llama.parameters()).dtype
+        input_embeds = input_embeds.to(dtype=model_dtype)
+
+        # Set topo_memory for cross-attention hook (kept alive for grad checkpoint recomputation)
+        self._topo_memory = topo_memory.unsqueeze(0).to(dtype=model_dtype)  # (1, N, hidden_dim)
 
         # Forward pass through Llama
         outputs = self.llama(
@@ -178,9 +212,11 @@ class LlamaBackend(nn.Module, BaseLLMBackend):
             output_hidden_states=True,
         )
 
-        # Clear topo_memory
-        self._topo_memory = None
+        # NOTE: _topo_memory intentionally NOT cleared here.
+        # Gradient checkpointing replays the forward pass during backward;
+        # the hook needs _topo_memory to still be set for identical recomputation.
+        # It gets overwritten on the next forward() call anyway.
 
-        # Return last hidden state, squeeze batch dim
-        hidden_states = outputs.hidden_states[-1].squeeze(0)  # (seq_len, hidden_dim)
+        # Return last hidden state, squeeze batch dim, cast back to fp32
+        hidden_states = outputs.hidden_states[-1].squeeze(0).float()  # (seq_len, hidden_dim)
         return hidden_states
