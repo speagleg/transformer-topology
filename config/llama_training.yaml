@@ -1,0 +1,79 @@
+model:
+  embedding_dim: 32
+  gnn_hidden: 64
+  gnn_spatial_layers: 2
+  gnn_spectral_layers: 2
+  max_freqs: 8
+  tat_layers: 2
+  tat_spatial_heads: 2
+  tat_spectral_heads: 2
+  tat_ff_dim: 128
+  max_iterations: 5
+  convergence_threshold: 0.1
+  use_wave_dynamics: true
+  use_higher_order: true
+  use_topological_pe: true
+  use_structural_features: true
+
+wave:
+  wave_mode: ensemble
+  filter_types: [chebyshev, wave_cosine, heat]
+  include_identity: true
+  include_sheaf: true
+  laplacian_dim: 0
+  wave_strength_gate: true
+  use_neural_ode: false
+
+llm:
+  backend: llama                        # 'mock' for CPU testing, 'llama' for real training
+  llm_dim: 2048                         # Llama 3.2 1B hidden dimension
+  model_name: unsloth/Llama-3.2-1B
+  cross_attn_layer: 8
+  lora_rank: 16
+  lora_alpha: 32
+  num_prefix: 8
+  gate_threshold: 0.05                  # lower threshold to encourage LLM usage
+
+training:
+  device: auto
+  learning_rate: 0.001                  # match proven 4b LR for GNN/TAT core
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  epochs: 30
+  patience: 10
+  max_norm: 5.0
+  accumulation_steps: 4                 # 4 like proven 4b runs (was 8, too few updates)
+
+benchmark:
+  tier: 3
+  seed: 42
+  train_n_nodes: 20
+  train_n_nodes_min: 16
+  train_n_nodes_max: 48
+  test_n_nodes: [20, 48, 80]
+  train_topologies: [ba, ws, sbm, er]
+  test_topologies: [grid, tree, ladder, caveman]
+  num_train: 2000               # 4x plumbing run; _load_or_generate subsamples pregenerated 5000
+  num_val: 200
+  num_test: 500
+  max_classes: 16
+  model_variants: [hierarchical_llm]
+  collect_diagnostics: true
+  output_dir: data/llama_results
+  checkpoint_dir: data/llama_checkpoints
+  datasets_dir: data/llama_datasets
+
+curriculum:
+  phase_a:
+    enabled: true
+    epochs: 30                          # more epochs, early stopping will cut short if converged
+    gate_penalty_weight: 1.0
+    tasks: [diverse, bfs, hodge_class, spectral_gap]
+  phase_b:
+    enabled: true
+    epochs: 30
+    tasks: [graph_completion, path_counting]
+  phase_c:
+    enabled: true
+    epochs: 30
+    tasks: [labeled_reasoning, analogical_transfer, graph_completion]

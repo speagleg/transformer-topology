@@ -19,6 +19,11 @@ NODE_LABEL_POOLS = {
     "weather": ["rain", "drought", "wind", "flood", "sunshine", "frost", "hail"],
     "health": ["fever", "infection", "medicine", "recovery", "fatigue", "rest", "pain"],
     "economy": ["demand", "supply", "price", "profit", "loss", "investment", "growth"],
+    "technology": ["server", "database", "network", "cache", "firewall", "router", "latency", "bandwidth"],
+    "biology": ["photosynthesis", "mitosis", "enzyme", "membrane", "nucleus", "ribosome", "protein", "gene"],
+    "politics": ["legislation", "veto", "coalition", "lobby", "mandate", "referendum", "treaty", "sanction"],
+    "sports": ["offense", "defense", "strategy", "stamina", "injury", "recovery", "momentum", "pressure"],
+    "music": ["harmony", "melody", "rhythm", "tempo", "resonance", "dissonance", "crescendo", "cadence"],
 }
 
 # Analogy domain pairs: (domain_a, domain_b, role_mapping)
@@ -30,6 +35,22 @@ ANALOGY_DOMAINS = [
     (
         {"teacher": 0, "student": 1, "principal": 2, "advisor": 3, "assistant": 4},
         {"mentor": 0, "apprentice": 1, "director": 2, "coach": 3, "intern": 4},
+    ),
+    (
+        {"sun": 0, "planet": 1, "moon": 2, "asteroid": 3, "comet": 4},
+        {"nucleus": 0, "electron": 1, "neutron": 2, "proton": 3, "photon": 4},
+    ),
+    (
+        {"general": 0, "soldier": 1, "medic": 2, "scout": 3, "engineer": 4},
+        {"ceo": 0, "employee": 1, "hr": 2, "analyst": 3, "developer": 4},
+    ),
+    (
+        {"predator": 0, "prey": 1, "scavenger": 2, "parasite": 3, "symbiont": 4},
+        {"compiler": 0, "source_code": 1, "debugger": 2, "virus": 3, "library": 4},
+    ),
+    (
+        {"river": 0, "tributary": 1, "delta": 2, "dam": 3, "reservoir": 4},
+        {"artery": 0, "capillary": 1, "vein": 2, "valve": 3, "heart": 4},
     ),
 ]
 
@@ -95,10 +116,12 @@ def generate_graph_completion_task(
         source_node=u, target_node=v,
     )
 
+    density = G_incomplete.number_of_edges() / max(1, n_nodes * (n_nodes - 1) / 2)
     metadata = {
         'task_type': 'graph_completion',
         'task_prompt': f'nodes={n_nodes} edges={G_incomplete.number_of_edges()} '
-                       f'removed={len(removed)} topology={topo} | task=graph_completion',
+                       f'original_edges={len(edges)} removed={len(removed)} '
+                       f'topology={topo} density={density:.3f} | task=graph_completion',
         'removed_edges': len(removed),
         'original_edges': len(edges),
     }
@@ -161,12 +184,18 @@ def generate_labeled_reasoning_task(
     )
 
     # Build prompt with labels
-    node_label_str = " ".join(f"{node_labels[n]}" for n in [source, target])
+    edge_label_counts = {l: sum(1 for v in edge_labels.values() if v == l) for l in CAUSAL_LABELS}
+    path_summary = ""
+    if answer != 2:  # connected
+        path_summary = f"path_len={len(path)} path_labels={','.join(path_labels)}"
     metadata = {
         'task_type': 'labeled_reasoning',
-        'task_prompt': f'domain={domain} nodes={n_nodes} | '
-                       f'src={node_labels[source]} tgt={node_labels[target]} | '
-                       f'task=labeled_reasoning',
+        'task_prompt': f'domain={domain} nodes={n_nodes} edges={G.number_of_edges()} '
+                       f'causes={edge_label_counts["causes"]} '
+                       f'prevents={edge_label_counts["prevents"]} '
+                       f'enables={edge_label_counts["enables"]} | '
+                       f'src={node_labels[source]} tgt={node_labels[target]} '
+                       f'{path_summary} | task=labeled_reasoning',
         'node_labels': node_labels,
         'edge_labels': {f"{u}-{v}": l for (u, v), l in edge_labels.items()},
         'domain': domain,
@@ -226,7 +255,9 @@ def generate_analogical_transfer_task(
 
     metadata = {
         'task_type': 'analogical_transfer',
-        'task_prompt': f'domain_a={",".join(roles_a)} domain_b={",".join(roles_b)} | '
+        'task_prompt': f'domain_a={",".join(roles_a)} domain_b={",".join(roles_b)} '
+                       f'nodes={G.number_of_nodes()} edges={G.number_of_edges()} '
+                       f'assigned_roles={num_roles} | '
                        f'query_role={roles_a[query_role_idx]} | task=analogical_transfer',
         'domain_a': roles_a,
         'domain_b': roles_b,
