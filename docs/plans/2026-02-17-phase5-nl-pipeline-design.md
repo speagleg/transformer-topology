@@ -221,3 +221,57 @@ class NLReasoningPipeline:
 - MockLLMBackend for all CPU tests
 - Phase 5a is fully functional without any training
 - Phase 5b training only touches new LoRA adapters, never the frozen core
+
+---
+
+## Phase 5 Enhancements — Training & Curriculum Fixes
+
+Issues identified during Phase 4c curriculum training v3 (vast.ai, ensemble mode, bypass_llm=True). These should be addressed in the next training iteration.
+
+### 1. max_classes mismatch (HIGH PRIORITY)
+
+**Problem:** Curriculum uses `max_classes=16` globally for all tasks, but the diverse task on n=20 graphs only produces classes 2-10 (9 classes). The benchmark suite uses `get_max_classes()` per task, giving diverse exactly 11 classes (0-10). The 5 dead output classes (0, 1, 11-15) waste softmax capacity and slow convergence.
+
+**Fix:** Use `get_max_classes(task_type)` per task in the curriculum script instead of a single global `max_classes`. The classifier head can be rebuilt per-phase since each phase trains different tasks anyway.
+
+**Impact:** ~30% of softmax capacity wasted. Benchmark diverse hit 90.2% with 11 classes; curriculum stuck at 49.5% at epoch 5 with 16 classes.
+
+### 2. Insufficient training data (MEDIUM PRIORITY)
+
+**Problem:** Curriculum uses 500 train / 100 val per task. Benchmark used 1000 train / 500 val. Half the data means ~2.5x slower convergence (benchmark hit 50% at epoch 2; curriculum hit 49.5% at epoch 5).
+
+**Fix:** Increase to at least 1000 train / 200 val. The Llama dataset generation plan already addresses this (5000 train / 500 val).
+
+### 3. Ensemble wave mode slows Phase A learning (MEDIUM PRIORITY)
+
+**Problem:** Ensemble runs 5 parallel spectral filters (chebyshev, wave_cosine, heat, identity, sheaf) with learned blending weights. This adds optimization complexity during Phase A when the model should just be learning core task structure. Benchmark used a single heat filter.
+
+**Fix:** Consider using `wave_mode: spectral` with a single filter for Phase A (regression lock), then switch to ensemble in Phase B/C. Or increase Phase A epoch budget significantly (current: 15 epochs; benchmark needed 22 with simpler setup).
+
+### 4. Phase A epoch budget too low (MEDIUM PRIORITY)
+
+**Problem:** Phase A allocates 15 epochs for regression lock. The benchmark's diverse task didn't plateau until epoch 22-28. With the slower convergence from issues 1-3, Phase A would need 45-65 epochs to reach benchmark parity.
+
+**Fix:** Either fix issues 1-3 first (then 15-20 epochs may suffice), or increase Phase A to 30-40 epochs.
+
+### 5. Benchmark phase transition at epochs 6-7
+
+**Observation:** The benchmark diverse training showed a sharp phase transition at epochs 6-7 where accuracy jumped from 53.6% → 74.8% in two epochs. This transition did not occur in curriculum v3 training (which regressed from 49.5% to 45.5% at the same epochs). The ensemble's additional optimization variables likely delay or prevent this phase transition.
+
+### Reference: Benchmark Diverse Accuracies (Phase 4b, Lambda A100)
+
+| Filter | Best Val | ID Acc | Epochs | Params |
+|--------|----------|--------|--------|--------|
+| heat (default) | 90.2% | 85.0% | 22/28 | 162,560 |
+| chebyshev | 81.6% | 74.2% | 11/17 | 162,565 |
+| wave_cosine | — | — | — | — |
+| nowave | — | — | — | — |
+
+### Reference: v3 Curriculum Training (vast.ai, ensemble, bypass_llm)
+
+| Epoch | Val Acc | Train Loss | Notes |
+|-------|---------|------------|-------|
+| 0 | 33.0% | — | — |
+| 3 | 46.0% | — | — |
+| 5 | 49.5% | — | Best so far |
+| 7 | 45.5% | — | Regression |
