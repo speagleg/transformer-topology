@@ -87,6 +87,14 @@ class HierarchicalMultiHopModel(nn.Module):
         self.use_llm = use_llm
         self.bypass_llm = False  # Set True to skip TopoBridge entirely (Phase A)
         wc = wave_config or {}
+
+        # Detect DSM backend: DSM lives inside the executive loop (interleaved
+        # every iteration) rather than as a post-hoc blend at model level.
+        lc = llm_config or {}
+        backend_type = lc.get('backend', 'mock')
+        use_dsm = (use_llm and backend_type == 'dsm')
+        dsm_config = lc if use_dsm else None
+
         self.executive_loop = ExecutiveReasoningLoop(
             embedding_dim=embedding_dim, gnn_hidden=gnn_hidden,
             gnn_spatial_layers=gnn_spatial_layers,
@@ -110,15 +118,15 @@ class HierarchicalMultiHopModel(nn.Module):
                 if k not in ('filter_type', 'laplacian_dim', 'wave_strength_gate',
                              'use_neural_ode', 'wave_mode')
             },
+            use_dsm=use_dsm,
+            dsm_config=dsm_config,
         )
 
-        # TopoBridge (LLM integration)
-        if use_llm:
-            lc = llm_config or {}
+        # Legacy TopoBridge for mock/llama backends (Phase 4c compat)
+        if use_llm and backend_type != 'dsm':
             llm_dim = lc.get('llm_dim', 2048)
             num_prefix = lc.get('num_prefix', 8)
             gate_threshold = lc.get('gate_threshold', 0.1)
-            backend_type = lc.get('backend', 'mock')
             if backend_type == 'llama':
                 from src.llm.llama_backend import LlamaBackend
                 backend = LlamaBackend(
