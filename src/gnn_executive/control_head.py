@@ -56,6 +56,9 @@ class ControlHead(nn.Module):
         self.time_head = nn.Linear(embedding_dim, 1)
         self.damping_head = nn.Linear(embedding_dim, 1)
         self.semantic_weight_head = nn.Linear(embedding_dim, 1)
+        # Initialize bias to -3.0 so sigmoid starts near 0.05, not 0.5.
+        # This prevents untrained DSM from corrupting TAT attention at init.
+        nn.init.constant_(self.semantic_weight_head.bias, -3.0)
 
         # Filter ensemble weights (only when multi-filter ensemble is active)
         if num_filters > 0:

@@ -69,6 +69,11 @@ class TopoBridgeDecoder(nn.Module):
         )
         # Semantic bias: projects node embeddings for pairwise attention bias
         self.semantic_bias_proj = nn.Linear(topo_dim, topo_dim)
+        # Initialize with small weights so semantic_bias starts near zero.
+        # projected @ projected.T with default init gives O(dim) entries,
+        # overwhelming TAT attention logits which are O(1).
+        nn.init.normal_(self.semantic_bias_proj.weight, std=0.01)
+        nn.init.zeros_(self.semantic_bias_proj.bias)
 
     def forward(
         self, topo_memory: torch.Tensor, llm_hidden: torch.Tensor
