@@ -76,4 +76,4 @@ class TestFilterWeightsHead:
         assert cs.confidence_weights.shape == (5,)
         assert cs.diffusion_time.shape == ()
         assert cs.wave_damping.shape == ()
-        assert cs.llm_gate.shape == ()
+        assert cs.semantic_weight.shape == ()

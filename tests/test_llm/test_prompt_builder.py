@@ -25,7 +25,7 @@ def _make_control_signal(n_nodes=10):
         confidence_weights=torch.ones(n_nodes) * 0.7,
         diffusion_time=torch.tensor(1.0),
         wave_damping=torch.tensor(0.5),
-        llm_gate=torch.tensor(0.8),
+        semantic_weight=torch.tensor(0.8),
     )
 
 
@@ -79,7 +79,7 @@ class TestBuildTopoPrompt:
         prompt = build_topo_prompt(cc)
         assert "conf=" not in prompt
 
-    def test_llm_gate_none(self):
+    def test_semantic_weight_none(self):
         cc = _make_cc(10)
         ctrl = ControlSignal(
             frequency_gate=torch.rand(8),

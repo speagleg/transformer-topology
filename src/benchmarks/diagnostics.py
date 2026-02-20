@@ -91,9 +91,9 @@ class DiagnosticCollector:
             record['diffusion_time'] = last_cs.diffusion_time.detach().cpu().item()
             record['wave_damping'] = last_cs.wave_damping.detach().cpu().item()
 
-            # LLM gate
-            if last_cs.llm_gate is not None:
-                record['llm_gate'] = last_cs.llm_gate.detach().cpu().item()
+            # Semantic weight
+            if last_cs.semantic_weight is not None:
+                record['semantic_weight'] = last_cs.semantic_weight.detach().cpu().item()
 
             # Filter weights (ensemble mode)
             if last_cs.filter_weights is not None:
@@ -163,12 +163,12 @@ class DiagnosticCollector:
         if wd_vals:
             summary.setdefault('wave_damping', {})['std'] = _std(wd_vals)
 
-        # LLM gate statistics
-        lg_vals = [r['llm_gate'] for r in self._records if 'llm_gate' in r]
-        if lg_vals:
-            summary['llm_gate'] = {
-                'mean': _mean(lg_vals),
-                'std': _std(lg_vals),
+        # Semantic weight statistics
+        sw_vals = [r['semantic_weight'] for r in self._records if 'semantic_weight' in r]
+        if sw_vals:
+            summary['semantic_weight'] = {
+                'mean': _mean(sw_vals),
+                'std': _std(sw_vals),
             }
 
         # Filter weights statistics (ensemble mode)

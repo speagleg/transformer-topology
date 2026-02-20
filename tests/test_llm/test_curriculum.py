@@ -68,27 +68,27 @@ class TestGatePenalty:
         assert loss > 0
 
 
-class TestDiagnosticsLLMGate:
-    def test_diagnostics_capture_llm_gate(self):
+class TestDiagnosticsSemanticWeight:
+    def test_diagnostics_capture_semantic_weight(self):
         model = HierarchicalMultiHopModel(**MC, use_llm=True, llm_config=LLM_CONFIG, max_classes=2)
         ds = BenchmarkDataset(5, 'graph_completion', 12, 16)
         collector = DiagnosticCollector()
         records = collector.collect(model, ds, torch.device('cpu'))
         assert len(records) == 5
-        # Every record should have llm_gate
+        # Every record should have semantic_weight
         for r in records:
-            assert 'llm_gate' in r
-            assert 0.0 <= r['llm_gate'] <= 1.0
+            assert 'semantic_weight' in r
+            assert 0.0 <= r['semantic_weight'] <= 1.0
 
-    def test_diagnostics_summary_includes_llm_gate(self):
+    def test_diagnostics_summary_includes_semantic_weight(self):
         model = HierarchicalMultiHopModel(**MC, use_llm=True, llm_config=LLM_CONFIG, max_classes=2)
         ds = BenchmarkDataset(5, 'graph_completion', 12, 16)
         collector = DiagnosticCollector()
         collector.collect(model, ds, torch.device('cpu'))
         summary = collector.summarize()
-        assert 'llm_gate' in summary
-        assert 'mean' in summary['llm_gate']
-        assert 'std' in summary['llm_gate']
+        assert 'semantic_weight' in summary
+        assert 'mean' in summary['semantic_weight']
+        assert 'std' in summary['semantic_weight']
 
     def test_diagnostics_5_tuple_dataset(self):
         """Diagnostics work with 5-tuple (LLM task) datasets."""

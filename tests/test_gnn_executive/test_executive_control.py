@@ -140,7 +140,7 @@ class TestGradientFlow:
             + ctrl.confidence_weights.sum()
             + ctrl.diffusion_time
             + ctrl.wave_damping
-            + ctrl.llm_gate
+            + ctrl.semantic_weight
         )
         loss.backward()
         # Every parameter in the control head should have a gradient

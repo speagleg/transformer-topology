@@ -198,19 +198,19 @@ class HierarchicalMultiHopModel(nn.Module):
         if self.use_llm and self.topo_bridge is not None and not self.bypass_llm:
             control_signals = diagnostics.get('control_signals', [])
             if control_signals:
-                llm_gate = control_signals[-1].llm_gate
+                semantic_weight = control_signals[-1].semantic_weight
             else:
-                llm_gate = torch.tensor(0.0, device=output.device)
+                semantic_weight = torch.tensor(0.0, device=output.device)
 
             task_text = None
             if metadata and 'task_prompt' in metadata:
                 task_text = metadata['task_prompt']
 
-            llm_out = self.topo_bridge(output, llm_gate, task_text)
+            llm_out = self.topo_bridge(output, semantic_weight, task_text)
 
-            # Blend: output = (1 - llm_gate) * executive_output + llm_gate * llm_out
-            # TopoBridge already scales by llm_gate, so we just add
-            output = (1 - llm_gate).unsqueeze(-1) * output + llm_out
+            # Blend: output = (1 - semantic_weight) * executive_output + semantic_weight * llm_out
+            # TopoBridge already scales by semantic_weight, so we just add
+            output = (1 - semantic_weight).unsqueeze(-1) * output + llm_out
 
         query_emb = output[query_node]
         target_emb = output[target_node]

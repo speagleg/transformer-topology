@@ -50,7 +50,7 @@ def build_topo_prompt(
     if control_signal is not None:
         conf = control_signal.confidence_weights.mean().item()
         parts.append(f"conf={conf:.2f}")
-        if control_signal.llm_gate is not None:
-            parts.append(f"gate={control_signal.llm_gate.item():.2f}")
+        if control_signal.semantic_weight is not None:
+            parts.append(f"gate={control_signal.semantic_weight.item():.2f}")
 
     return "[TOPO] " + " | ".join(parts) + " [/TOPO]"

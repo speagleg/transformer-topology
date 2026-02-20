@@ -97,7 +97,7 @@ class TopoBridgeDecoder(nn.Module):
 class TopoBridge(nn.Module):
     """Composes encoder + LLM backend + decoder for full topo→LLM→topo round trip.
 
-    When llm_gate < threshold, skips the LLM entirely and returns zeros.
+    When semantic_weight < threshold, skips the LLM entirely and returns zeros.
     """
 
     def __init__(
@@ -118,14 +118,14 @@ class TopoBridge(nn.Module):
     def forward(
         self,
         node_embeddings: torch.Tensor,
-        llm_gate: torch.Tensor,
+        semantic_weight: torch.Tensor,
         task_text: str | None = None,
     ) -> torch.Tensor:
         """Full TopoBridge forward pass with gate-based skip.
 
         Args:
             node_embeddings: (N, topo_dim) from TAT output.
-            llm_gate: scalar [0,1] from ControlHead.
+            semantic_weight: scalar [0,1] from ControlHead.
             task_text: Optional task description for the LLM.
 
         Returns:
@@ -134,7 +134,7 @@ class TopoBridge(nn.Module):
         n_nodes = node_embeddings.shape[0]
         device = node_embeddings.device
 
-        if llm_gate.item() < self.gate_threshold:
+        if semantic_weight.item() < self.gate_threshold:
             return torch.zeros(n_nodes, self.topo_dim, device=device)
 
         # Encode
@@ -146,5 +146,5 @@ class TopoBridge(nn.Module):
         # Decode back to topo space
         llm_out = self.decoder(topo_memory, llm_hidden)
 
-        # Scale by gate value so gradients flow through the gate
-        return llm_out * llm_gate
+        # Scale by semantic_weight so gradients flow through the gate
+        return llm_out * semantic_weight

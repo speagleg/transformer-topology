@@ -1,6 +1,6 @@
 """Phase 4c curriculum training: three-phase LLM integration.
 
-Phase A: Regression lock — train on existing tasks with llm_gate penalty.
+Phase A: Regression lock — train on existing tasks with semantic_weight penalty.
          Validates that LLM infrastructure doesn't break existing performance.
 Phase B: Graph completion — remove gate penalty, let model discover LLM utility.
 Phase C: Language + Analogy — full training on all tasks, no gate constraints.
@@ -54,19 +54,24 @@ def _build_optimizer(model, lr: float, weight_decay: float = 0.01,
 
 
 def _unfreeze_llm(model):
-    """Re-enable gradients on LLM params (after Phase A)."""
+    """Re-enable gradients on LLM params (after Phase A).
+
+    Only unfreezes LoRA adapters, TopoCrossAttention, and TopoBridge encoder
+    params. Frozen Llama base weights (under llama.*) stay frozen.
+    """
     for name, param in model.named_parameters():
-        if 'topo_bridge' in name or 'llm' in name:
-            # Only unfreeze params that were originally trainable
-            # (Llama base is frozen, LoRA/cross-attn are trainable)
-            if 'lora' in name or 'topo_cross_attn' in name or 'topo_bridge' in name:
-                param.requires_grad = True
+        if 'lora' in name or 'topo_cross_attn' in name:
+            param.requires_grad = True
+        elif 'topo_bridge' in name and 'llama' not in name:
+            # TopoBridge encoder params (node_proj, prefix, extractor)
+            # but NOT the nested Llama model weights
+            param.requires_grad = True
 
 
-def _llm_gate_penalty(model, weight: float = 1.0) -> torch.Tensor:
-    """Auxiliary loss that penalizes llm_gate > 0.
+def _semantic_weight_penalty(model, weight: float = 1.0) -> torch.Tensor:
+    """Auxiliary loss that penalizes semantic_weight > 0.
 
-    Encourages the model to keep the gate closed during Phase A
+    Encourages the model to keep the weight low during Phase A
     (regression lock), so LLM doesn't hurt existing tasks.
 
     Reads the last control signal from the most recent forward pass
@@ -84,13 +89,15 @@ def _llm_gate_penalty(model, weight: float = 1.0) -> torch.Tensor:
 def train_epoch_with_gate_penalty(
     model, dataset, optimizer, gate_penalty_weight=0.0,
     max_norm=5.0, accumulation_steps=4, label_smoothing=0.0, device=None,
-    scaler=None,
+    scaler=None, use_amp=False,
 ):
-    """Training loop with optional llm_gate penalty and AMP support.
+    """Training loop with optional semantic_weight penalty and AMP support.
 
     When gate_penalty_weight > 0, adds an auxiliary loss term that
-    penalizes the llm_gate value, encouraging the model to keep the
+    penalizes the semantic_weight value, encouraging the model to keep the
     LLM pathway closed.
+
+    use_amp: enable bf16 autocast (reduces backward memory ~50%).
     """
     if device is None:
         device = torch.device('cpu')
@@ -98,7 +105,7 @@ def train_epoch_with_gate_penalty(
     if hasattr(dataset, 'shuffle'):
         dataset.shuffle()
 
-    use_amp = scaler is not None and device.type == 'cuda'
+    amp_enabled = (use_amp or scaler is not None) and device.type == 'cuda'
     total_loss = 0.0
     total_gate_loss = 0.0
     grad_norms = []
@@ -108,7 +115,7 @@ def train_epoch_with_gate_penalty(
         cc, query, target, answer, metadata = _unpack_sample(dataset[i])
         cc = cc.clone().to(device)
 
-        with torch.amp.autocast('cuda', enabled=use_amp):
+        with torch.amp.autocast('cuda', enabled=amp_enabled, dtype=torch.bfloat16):
             logits = model(cc, query, target, metadata=metadata)
             ce_loss = torch.nn.functional.cross_entropy(
                 logits.unsqueeze(0),
@@ -116,13 +123,13 @@ def train_epoch_with_gate_penalty(
                 label_smoothing=label_smoothing,
             )
 
-            # Gate penalty: penalize llm_gate if weight > 0
+            # Gate penalty: penalize semantic_weight if weight > 0
             gate_loss = torch.tensor(0.0, device=device)
             if gate_penalty_weight > 0 and hasattr(model, 'executive_loop'):
                 if hasattr(model, 'use_llm') and model.use_llm:
                     node_emb = cc.get_embeddings(0).to(device)
                     ctrl = model.executive_loop.gnn_executive.control_head(node_emb)
-                    gate_loss = gate_penalty_weight * ctrl.llm_gate
+                    gate_loss = gate_penalty_weight * ctrl.semantic_weight
 
             loss = (ce_loss + gate_loss) / accumulation_steps
 
@@ -252,8 +259,11 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
     train_n = bc["train_n_nodes"]
     all_results = {}
 
-    # AMP disabled: spectral ops (eigh, svd, lstsq) require fp32,
-    # making autocast counterproductive (casting overhead > fp16 savings).
+    # AMP with bf16 autocast: reduces backward pass peak memory ~50%.
+    # Spectral ops (eigh, svd, lstsq) are not eligible for autocasting
+    # and stay in their input dtype (fp32), so they work correctly.
+    # GradScaler is NOT used with bf16 (only needed for fp16).
+    use_amp = device.type == 'cuda'
     scaler = None
 
     # ---- Resume from checkpoint if requested ----
@@ -272,7 +282,9 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
             print(f"  Resumed from checkpoint: {ckpt_path}")
         else:
             print(f"  WARNING: {ckpt_path} not found, starting from scratch")
-        # Enable TopoBridge for Phase B/C
+        # Enable TopoBridge for Phase B/C — aggressively free memory first
+        del state  # Free CPU checkpoint copy
+        import gc; gc.collect()
         if device.type == 'cuda':
             torch.cuda.empty_cache()
         model.bypass_llm = False
@@ -336,6 +348,7 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
                     accumulation_steps=tc.get("accumulation_steps", 4),
                     device=device,
                     scaler=scaler,
+                    use_amp=use_amp,
                 )
                 # Quick eval
                 from src.benchmarks.run_comparison import evaluate
@@ -443,6 +456,7 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
                     accumulation_steps=tc.get("accumulation_steps", 4),
                     device=device,
                     scaler=scaler,
+                    use_amp=use_amp,
                 )
                 from src.benchmarks.run_comparison import evaluate
                 val_acc, val_loss = evaluate(model, val_ds, device=device)
@@ -537,6 +551,7 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
                     accumulation_steps=tc.get("accumulation_steps", 4),
                     device=device,
                     scaler=scaler,
+                    use_amp=use_amp,
                 )
                 from src.benchmarks.run_comparison import evaluate
                 val_acc, val_loss = evaluate(model, val_ds, device=device)
@@ -596,7 +611,7 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
         collector = DiagnosticCollector()
         collector.collect(model, ds, device)
         summary = collector.summarize()
-        gate_info = summary.get("llm_gate", {})
+        gate_info = summary.get("semantic_weight", {})
         conf_info = summary.get("confidence", {})
         print(f"  {task:25s} gate={gate_info.get('mean', 0):.3f}±{gate_info.get('std', 0):.3f} "
               f"conf={conf_info.get('mean', 0):.3f}")

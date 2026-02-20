@@ -56,7 +56,7 @@ class TestControlHead:
         cs = head(node_emb)
         loss = (cs.frequency_gate.sum() + cs.spatial_focus.sum() +
                 cs.confidence_weights.sum() + cs.diffusion_time + cs.wave_damping +
-                cs.llm_gate)
+                cs.semantic_weight)
         loss.backward()
         assert node_emb.grad is not None
         assert node_emb.grad.abs().sum() > 0

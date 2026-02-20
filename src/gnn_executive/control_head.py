@@ -16,7 +16,7 @@ class ControlSignal:
         confidence_weights: (num_nodes,) — how much to trust TAT output per node [0,1].
         diffusion_time: scalar — wave propagation time (positive).
         wave_damping: scalar — wave dissipation (positive).
-        llm_gate: scalar — whether to invoke LLM pathway [0,1]. Skip when < 0.1.
+        semantic_weight: scalar — soft weight for DSM attention bias [0,1]. Never penalized.
         filter_weights: (num_filters,) — softmax weights over spectral filter ensemble.
     """
     frequency_gate: torch.Tensor
@@ -24,7 +24,7 @@ class ControlSignal:
     confidence_weights: torch.Tensor
     diffusion_time: torch.Tensor
     wave_damping: torch.Tensor
-    llm_gate: torch.Tensor = None
+    semantic_weight: torch.Tensor = None
     filter_weights: torch.Tensor = None
 
 
@@ -55,7 +55,7 @@ class ControlHead(nn.Module):
         self.confidence_head = nn.Linear(embedding_dim, 1)  # per-node
         self.time_head = nn.Linear(embedding_dim, 1)
         self.damping_head = nn.Linear(embedding_dim, 1)
-        self.llm_gate_head = nn.Linear(embedding_dim, 1)
+        self.semantic_weight_head = nn.Linear(embedding_dim, 1)
 
         # Filter ensemble weights (only when multi-filter ensemble is active)
         if num_filters > 0:
@@ -106,8 +106,8 @@ class ControlHead(nn.Module):
         diffusion_time = torch.nn.functional.softplus(self.time_head(features).squeeze())
         wave_damping = torch.nn.functional.softplus(self.damping_head(features).squeeze())
 
-        # LLM gate: scalar [0,1] — whether to invoke LLM pathway
-        llm_gate = torch.sigmoid(self.llm_gate_head(features).squeeze())
+        # Semantic weight: scalar [0,1] — soft weight for DSM attention bias
+        semantic_weight = torch.sigmoid(self.semantic_weight_head(features).squeeze())
 
         # Filter ensemble weights: softmax over filter paths
         filter_weights = None
@@ -122,6 +122,6 @@ class ControlHead(nn.Module):
             confidence_weights=confidence_weights,
             diffusion_time=diffusion_time,
             wave_damping=wave_damping,
-            llm_gate=llm_gate,
+            semantic_weight=semantic_weight,
             filter_weights=filter_weights,
         )
