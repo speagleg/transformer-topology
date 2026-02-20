@@ -56,11 +56,7 @@ class TopoBridgeEncoder(nn.Module):
 
 
 class TopoBridgeDecoder(nn.Module):
-    """Extracts node-aligned embeddings from LLM hidden states back to topo space.
-
-    Uses cross-attention: topo_memory queries attend over LLM hidden states,
-    then projects back to topo_dim.
-    """
+    """Extracts node-aligned embeddings and semantic bias from LLM hidden states."""
 
     def __init__(self, topo_dim: int = 32, llm_dim: int = 2048):
         super().__init__()
@@ -71,11 +67,13 @@ class TopoBridgeDecoder(nn.Module):
             nn.Linear(llm_dim, topo_dim),
             nn.LayerNorm(topo_dim),
         )
+        # Semantic bias: projects node embeddings for pairwise attention bias
+        self.semantic_bias_proj = nn.Linear(topo_dim, topo_dim)
 
     def forward(
         self, topo_memory: torch.Tensor, llm_hidden: torch.Tensor
-    ) -> torch.Tensor:
-        """Decode LLM hidden states back to node-aligned topo embeddings.
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Decode LLM hidden states back to node-aligned topo embeddings + bias.
 
         Args:
             topo_memory: (N, llm_dim) from encoder — used as queries.
@@ -83,6 +81,7 @@ class TopoBridgeDecoder(nn.Module):
 
         Returns:
             llm_out: (N, topo_dim) node-aligned output embeddings.
+            semantic_bias: (N, N) pairwise attention bias for TAT.
         """
         # Cross-attention: node queries attend over LLM hidden states
         # queries: (N, 1, llm_dim), kv: (seq, 1, llm_dim)
@@ -91,14 +90,17 @@ class TopoBridgeDecoder(nn.Module):
         attn_out, _ = self.cross_attn(queries, kv, kv)  # (N, 1, llm_dim)
         attn_out = attn_out.squeeze(1)  # (N, llm_dim)
 
-        return self.out_proj(attn_out)  # (N, topo_dim)
+        llm_out = self.out_proj(attn_out)  # (N, topo_dim)
+
+        # Compute semantic bias: pairwise similarity in projected space
+        projected = self.semantic_bias_proj(llm_out)  # (N, topo_dim)
+        semantic_bias = projected @ projected.T  # (N, N)
+
+        return llm_out, semantic_bias
 
 
 class TopoBridge(nn.Module):
-    """Composes encoder + LLM backend + decoder for full topo→LLM→topo round trip.
-
-    When semantic_weight < threshold, skips the LLM entirely and returns zeros.
-    """
+    """Composes encoder + LLM backend + decoder for topo→LLM→topo round trip."""
 
     def __init__(
         self,
@@ -106,45 +108,38 @@ class TopoBridge(nn.Module):
         topo_dim: int = 32,
         llm_dim: int = 2048,
         num_prefix: int = 8,
-        gate_threshold: float = 0.1,
+        gate_threshold: float = 0.1,  # kept for backward compat signature
     ):
         super().__init__()
         self.encoder = TopoBridgeEncoder(topo_dim, llm_dim, num_prefix)
         self.decoder = TopoBridgeDecoder(topo_dim, llm_dim)
         self.backend = backend
         self.topo_dim = topo_dim
-        self.gate_threshold = gate_threshold
 
     def forward(
         self,
         node_embeddings: torch.Tensor,
         semantic_weight: torch.Tensor,
         task_text: str | None = None,
-    ) -> torch.Tensor:
-        """Full TopoBridge forward pass with gate-based skip.
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Full TopoBridge forward pass — always runs (no gate skip).
 
         Args:
-            node_embeddings: (N, topo_dim) from TAT output.
-            semantic_weight: scalar [0,1] from ControlHead.
-            task_text: Optional task description for the LLM.
+            node_embeddings: (N, topo_dim) from TAT/GNN output.
+            semantic_weight: scalar [0,1] from ControlHead (unused here but kept for interface).
+            task_text: Optional task description for the LLM/DSM.
 
         Returns:
-            llm_out: (N, topo_dim) — node-aligned LLM output, or zeros if gate < threshold.
+            llm_out: (N, topo_dim) node-aligned output.
+            semantic_bias: (N, N) pairwise bias for TAT attention.
         """
-        n_nodes = node_embeddings.shape[0]
-        device = node_embeddings.device
-
-        if semantic_weight.item() < self.gate_threshold:
-            return torch.zeros(n_nodes, self.topo_dim, device=device)
-
         # Encode
         topo_memory, prefix_tokens = self.encoder(node_embeddings)
 
         # LLM forward
         llm_hidden = self.backend.forward(prefix_tokens, topo_memory, task_text)
 
-        # Decode back to topo space
-        llm_out = self.decoder(topo_memory, llm_hidden)
+        # Decode back to topo space + semantic bias
+        llm_out, semantic_bias = self.decoder(topo_memory, llm_hidden)
 
-        # Scale by semantic_weight so gradients flow through the gate
-        return llm_out * semantic_weight
+        return llm_out, semantic_bias

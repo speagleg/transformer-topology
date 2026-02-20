@@ -56,23 +56,25 @@ class TestTopoBridgeDecoder:
         dec = TopoBridgeDecoder(topo_dim=TOPO_DIM, llm_dim=LLM_DIM)
         topo_memory = torch.randn(10, LLM_DIM)
         llm_hidden = torch.randn(18, LLM_DIM)  # prefix + nodes
-        out = dec(topo_memory, llm_hidden)
-        assert out.shape == (10, TOPO_DIM)
+        llm_out, semantic_bias = dec(topo_memory, llm_hidden)
+        assert llm_out.shape == (10, TOPO_DIM)
+        assert semantic_bias.shape == (10, 10)
 
     def test_different_graph_sizes(self):
         dec = TopoBridgeDecoder(topo_dim=TOPO_DIM, llm_dim=LLM_DIM)
         for n in [3, 10, 25]:
             topo_memory = torch.randn(n, LLM_DIM)
             llm_hidden = torch.randn(n + NUM_PREFIX, LLM_DIM)
-            out = dec(topo_memory, llm_hidden)
-            assert out.shape == (n, TOPO_DIM)
+            llm_out, semantic_bias = dec(topo_memory, llm_hidden)
+            assert llm_out.shape == (n, TOPO_DIM)
+            assert semantic_bias.shape == (n, n)
 
     def test_gradient_flow(self):
         dec = TopoBridgeDecoder(topo_dim=TOPO_DIM, llm_dim=LLM_DIM)
         topo_memory = torch.randn(10, LLM_DIM, requires_grad=True)
         llm_hidden = torch.randn(14, LLM_DIM, requires_grad=True)
-        out = dec(topo_memory, llm_hidden)
-        out.sum().backward()
+        llm_out, semantic_bias = dec(topo_memory, llm_hidden)
+        (llm_out.sum() + semantic_bias.sum()).backward()
         assert topo_memory.grad is not None
         assert llm_hidden.grad is not None
 
@@ -111,50 +113,40 @@ class TestTopoBridge:
             topo_dim=TOPO_DIM,
             llm_dim=LLM_DIM,
             num_prefix=NUM_PREFIX,
-            gate_threshold=0.1,
         )
 
     def test_end_to_end_shape(self):
         bridge = self._make_bridge()
         nodes = torch.randn(10, TOPO_DIM)
         gate = torch.tensor(0.8)
-        out = bridge(nodes, gate)
-        assert out.shape == (10, TOPO_DIM)
+        llm_out, semantic_bias = bridge(nodes, gate)
+        assert llm_out.shape == (10, TOPO_DIM)
+        assert semantic_bias.shape == (10, 10)
 
-    def test_gate_skip_returns_zeros(self):
+    def test_always_runs_even_low_weight(self):
+        """No gate threshold skip — DSM always runs now."""
         bridge = self._make_bridge()
         nodes = torch.randn(10, TOPO_DIM)
-        gate = torch.tensor(0.05)  # Below threshold
-        out = bridge(nodes, gate)
-        assert out.shape == (10, TOPO_DIM)
-        assert (out == 0).all()
+        gate = torch.tensor(0.05)  # Previously below threshold
+        llm_out, semantic_bias = bridge(nodes, gate)
+        assert llm_out.shape == (10, TOPO_DIM)
+        assert llm_out.abs().sum() > 0
+        assert semantic_bias.abs().sum() > 0
 
-    def test_gate_activate_returns_nonzero(self):
+    def test_returns_nonzero(self):
         bridge = self._make_bridge()
         nodes = torch.randn(10, TOPO_DIM)
         gate = torch.tensor(0.8)
-        out = bridge(nodes, gate)
-        assert out.abs().sum() > 0
-
-    def test_output_scaled_by_gate(self):
-        bridge = self._make_bridge()
-        nodes = torch.randn(10, TOPO_DIM)
-        out_low = bridge(nodes, torch.tensor(0.2))
-        out_high = bridge(nodes, torch.tensor(0.8))
-        # Higher gate → larger magnitude (same direction, just scaled)
-        assert out_high.abs().sum() > out_low.abs().sum()
+        llm_out, semantic_bias = bridge(nodes, gate)
+        assert llm_out.abs().sum() > 0
 
     def test_gradient_flows_through_bridge(self):
         torch.manual_seed(42)  # Fix seed for reproducible attention init
         bridge = self._make_bridge()
         nodes = torch.randn(10, TOPO_DIM, requires_grad=True)
-        gate = torch.tensor(0.8, requires_grad=True)
-        out = bridge(nodes, gate)
-        out.sum().backward()
+        llm_out, semantic_bias = bridge(nodes, torch.tensor(0.8))
+        (llm_out.sum() + semantic_bias.sum()).backward()
         assert nodes.grad is not None
-        # Gate gradient: always non-zero since output = llm_out * gate
-        assert gate.grad is not None
-        assert gate.grad.abs() > 0
         # Bridge params gradient: at least some encoder/decoder params get gradients
         grads_found = sum(
             1 for p in bridge.parameters()
@@ -166,17 +158,58 @@ class TestTopoBridge:
         bridge = self._make_bridge()
         for n in [3, 10, 25, 50]:
             nodes = torch.randn(n, TOPO_DIM)
-            out = bridge(nodes, torch.tensor(0.5))
-            assert out.shape == (n, TOPO_DIM)
+            llm_out, semantic_bias = bridge(nodes, torch.tensor(0.5))
+            assert llm_out.shape == (n, TOPO_DIM)
+            assert semantic_bias.shape == (n, n)
 
     def test_outputs_finite(self):
         bridge = self._make_bridge()
         nodes = torch.randn(20, TOPO_DIM)
-        out = bridge(nodes, torch.tensor(0.9))
-        assert torch.isfinite(out).all()
+        llm_out, semantic_bias = bridge(nodes, torch.tensor(0.9))
+        assert torch.isfinite(llm_out).all()
+        assert torch.isfinite(semantic_bias).all()
 
     def test_parameter_count_reasonable(self):
         bridge = self._make_bridge()
         total = sum(p.numel() for p in bridge.parameters())
         # With LLM_DIM=128, should be well under 1M
         assert total < 500_000
+
+
+class TestTopoBridgeWithSemanticBias:
+    def _make_bridge(self):
+        backend = MockLLMBackend(llm_dim=LLM_DIM, hidden_dim=64)
+        return TopoBridge(
+            backend=backend,
+            topo_dim=TOPO_DIM,
+            llm_dim=LLM_DIM,
+            num_prefix=NUM_PREFIX,
+        )
+
+    def test_forward_returns_tuple(self):
+        bridge = self._make_bridge()
+        nodes = torch.randn(10, TOPO_DIM)
+        llm_out, semantic_bias = bridge(nodes, torch.tensor(0.5))
+        assert llm_out.shape == (10, TOPO_DIM)
+        assert semantic_bias.shape == (10, 10)
+
+    def test_semantic_bias_variable_sizes(self):
+        bridge = self._make_bridge()
+        for n in [3, 10, 25]:
+            nodes = torch.randn(n, TOPO_DIM)
+            _, semantic_bias = bridge(nodes, torch.tensor(0.5))
+            assert semantic_bias.shape == (n, n)
+
+    def test_semantic_bias_gradient_flow(self):
+        bridge = self._make_bridge()
+        nodes = torch.randn(10, TOPO_DIM, requires_grad=True)
+        _, semantic_bias = bridge(nodes, torch.tensor(0.5))
+        semantic_bias.sum().backward()
+        assert nodes.grad is not None
+
+    def test_no_gate_threshold_skip(self):
+        bridge = self._make_bridge()
+        nodes = torch.randn(10, TOPO_DIM)
+        llm_out, semantic_bias = bridge(nodes, torch.tensor(0.01))
+        assert llm_out.abs().sum() > 0
+        assert semantic_bias.abs().sum() > 0

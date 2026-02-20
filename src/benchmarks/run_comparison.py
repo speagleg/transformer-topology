@@ -206,11 +206,11 @@ class HierarchicalMultiHopModel(nn.Module):
             if metadata and 'task_prompt' in metadata:
                 task_text = metadata['task_prompt']
 
-            llm_out = self.topo_bridge(output, semantic_weight, task_text)
+            llm_out, _semantic_bias = self.topo_bridge(output, semantic_weight, task_text)
 
             # Blend: output = (1 - semantic_weight) * executive_output + semantic_weight * llm_out
-            # TopoBridge already scales by semantic_weight, so we just add
-            output = (1 - semantic_weight).unsqueeze(-1) * output + llm_out
+            # _semantic_bias is unused in legacy path (used in DSM executive loop, Task 6)
+            output = (1 - semantic_weight).unsqueeze(-1) * output + semantic_weight.unsqueeze(-1) * llm_out
 
         query_emb = output[query_node]
         target_emb = output[target_node]
