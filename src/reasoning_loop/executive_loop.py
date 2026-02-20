@@ -7,7 +7,8 @@ temporal propagation between GNN analysis and TAT execution.
 Loop per iteration:
     1. GNN analyzes CC → (gnn_out, edge_out, control_signal)
     2. Wave dynamics (optional) → wave_out, added as residual to gnn_out
-    3. TAT executes with control signals → tat_out
+    2.5. DSM (optional) → semantic_bias for TAT attention
+    3. TAT executes with control signals + semantic bias → tat_out
     4. Confidence-weighted integration: conf * tat_out + (1-conf) * gnn_out
     5. Harmonic convergence check
 """
@@ -48,7 +49,9 @@ class ExecutiveReasoningLoop(nn.Module):
                  wave_strength_gate: bool = False,
                  wave_use_neural_ode: bool = True,
                  wave_filter_kwargs: dict | None = None,
-                 wave_mode: str = 'spectral'):
+                 wave_mode: str = 'spectral',
+                 use_dsm: bool = False,
+                 dsm_config: dict | None = None):
         super().__init__()
         self.max_iterations = max_iterations
         self.convergence_threshold = convergence_threshold
@@ -118,6 +121,28 @@ class ExecutiveReasoningLoop(nn.Module):
         # Fixed at 0.5 because the blend happens inside detach() so a learned
         # gate would get zero gradients.
         self.edge_residual_ratio = 0.5
+
+        # DSM integration (optional)
+        self.use_dsm = use_dsm
+        self.topo_bridge = None
+        if use_dsm:
+            from src.llm.dsm_backend import DSMBackend
+            from src.llm.topo_bridge import TopoBridge
+            dc = dsm_config or {}
+            dsm_dim = dc.get('dsm_dim', 1024)
+            backend = DSMBackend(
+                dsm_dim=dsm_dim,
+                num_heads=dc.get('num_heads', 16),
+                ff_dim=dc.get('ff_dim', 4096),
+                num_layers=dc.get('num_layers', 16),
+                cross_attn_layer=dc.get('cross_attn_layer', 4),
+            )
+            self.topo_bridge = TopoBridge(
+                backend=backend,
+                topo_dim=embedding_dim,
+                llm_dim=dsm_dim,
+                num_prefix=dc.get('num_prefix', 8),
+            )
 
     def _compute_harmonic_energy(self, cc: CellComplex) -> torch.Tensor:
         """Compute harmonic component energy of edge signals for convergence tracking.
@@ -192,11 +217,20 @@ class ExecutiveReasoningLoop(nn.Module):
                 )
                 gnn_out = gnn_out + wave_out  # residual addition
 
+            # 2.5. DSM: encode → DSM forward → decode → semantic_bias
+            semantic_bias = None
+            semantic_weight = None
+            if self.use_dsm and self.topo_bridge is not None:
+                semantic_weight = control.semantic_weight
+                _, semantic_bias = self.topo_bridge(gnn_out, semantic_weight)
+
             # Update cell complex for TAT (detach for graph safety)
             cc.set_embeddings(0, gnn_out.detach())
 
-            # 3. TAT executes with control signals
-            tat_out = self.tat(cc, control_signal=control)
+            # 3. TAT executes with control signals + semantic bias
+            tat_out = self.tat(cc, control_signal=control,
+                               semantic_bias=semantic_bias,
+                               semantic_weight=semantic_weight)
 
             # 4. Confidence-weighted integration
             confidence = control.confidence_weights.unsqueeze(-1)  # (N, 1)
