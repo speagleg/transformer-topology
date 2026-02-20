@@ -35,7 +35,9 @@ class TopologicalSpatialAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, adjacency: torch.Tensor,
                 spatial_focus: torch.Tensor | None = None,
-                edge_weights: torch.Tensor | None = None) -> torch.Tensor:
+                edge_weights: torch.Tensor | None = None,
+                semantic_bias: torch.Tensor | None = None,
+                semantic_weight: torch.Tensor | None = None) -> torch.Tensor:
         """Forward pass with adjacency-masked attention.
 
         Args:
@@ -48,6 +50,13 @@ class TopologicalSpatialAttention(nn.Module):
             edge_weights: Optional tensor of shape ``(N, N)`` with scalar edge
                 weights.  When provided, projected per-head biases are added
                 to the attention scores before softmax.
+            semantic_bias: Optional tensor of shape ``(N, N)`` from the DSM
+                (Distilled Semantic Model).  Added to attention logits before
+                softmax, scaled by ``semantic_weight``.  When ``None``, no
+                semantic bias is applied.
+            semantic_weight: Optional scalar tensor in ``[0, 1]`` controlling
+                the strength of ``semantic_bias``.  When ``None`` and
+                ``semantic_bias`` is provided, defaults to ``1.0``.
 
         Returns:
             Output features of shape ``(N, embed_dim)`` after residual
@@ -80,6 +89,12 @@ class TopologicalSpatialAttention(nn.Module):
             # Bias the key dimension so attended-to nodes with higher focus
             # receive proportionally higher attention scores.
             scores = scores + spatial_focus.unsqueeze(0).unsqueeze(0)
+
+        # Apply semantic bias from DSM
+        if semantic_bias is not None:
+            weight = semantic_weight if semantic_weight is not None else torch.tensor(1.0, device=scores.device)
+            # Broadcast (N, N) to (num_heads, N, N)
+            scores = scores + weight * semantic_bias.unsqueeze(0)
 
         attn_weights = torch.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)

@@ -55,7 +55,9 @@ class TATBlock(nn.Module):
     def forward(self, x: torch.Tensor, adjacency: torch.Tensor,
                 eigenvalues: torch.Tensor, eigenvectors: torch.Tensor,
                 control_signal: ControlSignal | None = None,
-                edge_weights: torch.Tensor | None = None) -> torch.Tensor:
+                edge_weights: torch.Tensor | None = None,
+                semantic_bias: torch.Tensor | None = None,
+                semantic_weight: torch.Tensor | None = None) -> torch.Tensor:
         """Forward pass through the dual-attention block.
 
         Args:
@@ -68,6 +70,11 @@ class TATBlock(nn.Module):
                 attention and ``frequency_gate`` gates spectral attention.
             edge_weights: Optional tensor of shape (N, N) with scalar edge
                 weights passed to spatial attention.
+            semantic_bias: Optional tensor of shape (N, N) from the DSM.
+                Passed through to spatial attention as an additive bias on
+                attention logits.
+            semantic_weight: Optional scalar tensor in [0, 1] controlling
+                the strength of ``semantic_bias``.
 
         Returns:
             Output tensor of shape (N, embed_dim).
@@ -76,7 +83,9 @@ class TATBlock(nn.Module):
         frequency_gate = control_signal.frequency_gate if control_signal is not None else None
 
         spatial_out = self.spatial_attn(x, adjacency=adjacency, spatial_focus=spatial_focus,
-                                        edge_weights=edge_weights)
+                                        edge_weights=edge_weights,
+                                        semantic_bias=semantic_bias,
+                                        semantic_weight=semantic_weight)
         spectral_out = self.spectral_attn(x, eigenvalues=eigenvalues, eigenvectors=eigenvectors,
                                           frequency_gate=frequency_gate)
         g = self.gate(torch.cat([spatial_out, spectral_out], dim=-1))
@@ -127,7 +136,9 @@ class TopologyAwareTransformer(nn.Module):
             )
 
     def forward(self, cc: CellComplex,
-                control_signal: ControlSignal | None = None) -> torch.Tensor:
+                control_signal: ControlSignal | None = None,
+                semantic_bias: torch.Tensor | None = None,
+                semantic_weight: torch.Tensor | None = None) -> torch.Tensor:
         """Forward pass through the full transformer.
 
         Extracts node embeddings and adjacency from the cell complex,
@@ -138,6 +149,11 @@ class TopologyAwareTransformer(nn.Module):
             control_signal: Optional :class:`ControlSignal` from the GNN
                 executive.  Passed through to each :class:`TATBlock` to
                 modulate spatial and spectral attention.
+            semantic_bias: Optional tensor of shape ``(N, N)`` from the DSM.
+                Passed through to each block's spatial attention as an
+                additive bias on attention logits.
+            semantic_weight: Optional scalar tensor in ``[0, 1]`` controlling
+                the strength of ``semantic_bias``.
 
         Returns:
             Output node features of shape (N, embedding_dim).
@@ -157,5 +173,6 @@ class TopologyAwareTransformer(nn.Module):
 
         for block in self.blocks:
             x = block(x, adjacency, eigenvalues, eigenvectors,
-                      control_signal=control_signal, edge_weights=edge_weights)
+                      control_signal=control_signal, edge_weights=edge_weights,
+                      semantic_bias=semantic_bias, semantic_weight=semantic_weight)
         return x
