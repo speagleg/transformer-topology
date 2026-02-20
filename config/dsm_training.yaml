@@ -1,0 +1,58 @@
+# DSM (Distilled Semantic Model) Training Configuration
+# Phase 6: Interleaved DSM-GNN Symbiotic Architecture
+#
+# Full 250M DSM: 1024-dim, 16 layers, 16 heads, 4096 FFN
+# For CPU testing, override dsm_dim=64, num_heads=4, ff_dim=128, num_layers=2
+
+model:
+  embedding_dim: 32
+  gnn_hidden: 64
+  gnn_spatial_layers: 2
+  gnn_spectral_layers: 1
+  max_freqs: 16
+  tat_layers: 2
+  tat_spatial_heads: 4
+  tat_spectral_heads: 4
+  tat_ff_dim: 128
+  use_higher_order: true
+  use_topological_pe: true
+  use_structural_features: true
+
+wave:
+  wave_mode: ensemble
+  filter_types: [chebyshev, wave_cosine, heat]
+  include_identity: true
+  include_sheaf: false
+  wave_strength_gate: true
+  use_neural_ode: true
+
+llm:
+  backend: dsm
+  dsm_dim: 1024
+  num_heads: 16
+  ff_dim: 4096
+  num_layers: 16
+  cross_attn_layer: 4
+  num_prefix: 8
+
+training:
+  device: auto
+  learning_rate: 0.001
+  dsm_learning_rate: 0.0005
+  bridge_learning_rate: 0.0001
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  epochs_phase_a: 30
+  epochs_phase_b: 30
+  epochs_phase_c: 30
+  patience: 10
+
+benchmark:
+  train_samples: 5000
+  val_samples: 500
+  test_samples: 500
+  train_n_nodes_min: 16
+  train_n_nodes_max: 32
+  test_n_nodes: [20, 40, 80]
+  train_topologies: [ba, ws, grid, tree, ladder, sbm]
+  test_topologies: [er, caveman]
