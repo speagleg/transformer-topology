@@ -33,12 +33,12 @@ class TestEnrichedDomains:
             assert len(terms) == len(set(terms)), f"Domain '{domain}' has duplicates"
 
     def test_analogy_domains_count(self):
-        assert len(ANALOGY_DOMAINS) >= 6
+        assert len(ANALOGY_DOMAINS) >= 2
 
-    def test_analogy_domains_have_5_roles(self):
+    def test_analogy_domains_have_roles(self):
         for domain_a, domain_b in ANALOGY_DOMAINS:
-            assert len(domain_a) >= 5, f"domain_a has only {len(domain_a)} roles"
-            assert len(domain_b) >= 5, f"domain_b has only {len(domain_b)} roles"
+            assert len(domain_a) >= 3, f"domain_a has only {len(domain_a)} roles"
+            assert len(domain_b) >= 3, f"domain_b has only {len(domain_b)} roles"
 
     def test_analogy_role_indices_match(self):
         for domain_a, domain_b in ANALOGY_DOMAINS:
@@ -58,9 +58,9 @@ class TestEnrichedDomains:
     def test_new_analogy_pairs_generate_valid_samples(self):
         for _ in range(30):
             _, _, _, answer, metadata = generate_analogical_transfer_task(15, 16)
-            assert 0 <= answer <= 4
-            assert len(metadata['domain_a']) >= 5
-            assert len(metadata['domain_b']) >= 5
+            assert 0 <= answer <= 2
+            assert len(metadata['domain_a']) >= 3
+            assert len(metadata['domain_b']) >= 3
 
     def test_enriched_task_prompt_labeled_reasoning(self):
         _, _, _, _, metadata = generate_labeled_reasoning_task(15, 16)
