@@ -129,6 +129,159 @@ def generate_graph_completion_task(
     return cc, node_map[u], node_map[v], answer, metadata
 
 
+def _build_labeled_graph(
+    n_nodes: int,
+    topologies: list[str] | None,
+) -> tuple[nx.Graph, str]:
+    """Build a labeled causal graph with node and edge text labels.
+
+    Returns (G, domain) where G has 'label' on nodes and 'causal_label' on edges.
+    """
+    topo = random.choice(topologies) if topologies else None
+    G = random_graph(n_nodes, topology=topo)
+
+    domain = random.choice(list(NODE_LABEL_POOLS.keys()))
+    label_pool = NODE_LABEL_POOLS[domain]
+    for node in G.nodes():
+        G.nodes[node]['label'] = random.choice(label_pool)
+
+    for u, v in G.edges():
+        G.edges[u, v]['causal_label'] = random.choice(CAUSAL_LABELS)
+
+    return G, domain
+
+
+def _extract_labels(G: nx.Graph) -> tuple[dict, dict]:
+    """Extract node_labels and edge_labels dicts from graph attributes."""
+    node_labels = {n: G.nodes[n].get('label', '?') for n in G.nodes()}
+    edge_labels = {(u, v): G.edges[u, v].get('causal_label', 'causes')
+                   for u, v in G.edges()}
+    return node_labels, edge_labels
+
+
+def _generate_causal_chain(
+    G: nx.Graph,
+) -> tuple[int, int, list[str]]:
+    """Pick source/target with a causal (non-blocked) path.
+
+    Tries up to 50 random pairs; if all have 'prevents' on the shortest path,
+    forces a causal chain by relabeling the blocking edges.
+    """
+    nodes = list(G.nodes())
+    edge_labels = {(u, v): G.edges[u, v].get('causal_label', 'causes')
+                   for u, v in G.edges()}
+
+    for _ in range(50):
+        source, target = random.sample(nodes, 2)
+        if not nx.has_path(G, source, target):
+            continue
+        path = nx.shortest_path(G, source, target)
+        path_labels = []
+        for i in range(len(path) - 1):
+            u, v = path[i], path[i + 1]
+            label = edge_labels.get((u, v)) or edge_labels.get((v, u), "causes")
+            path_labels.append(label)
+        if "prevents" not in path_labels:
+            return source, target, path_labels
+
+    # Fallback: pick any connected pair and force "causes" on blocking edges
+    source, target = random.sample(nodes, 2)
+    if not nx.has_path(G, source, target):
+        source, target = nodes[0], nodes[1]
+    path = nx.shortest_path(G, source, target)
+    path_labels = []
+    for i in range(len(path) - 1):
+        u, v = path[i], path[i + 1]
+        key = (u, v) if (u, v) in edge_labels else (v, u)
+        if edge_labels.get(key) == "prevents":
+            edge_labels[key] = "causes"
+            G.edges[key[0], key[1]]['causal_label'] = "causes"
+        label = edge_labels.get((u, v)) or edge_labels.get((v, u), "causes")
+        path_labels.append(label)
+    return source, target, path_labels
+
+
+def _generate_blocked(
+    G: nx.Graph,
+) -> tuple[int, int, list[str]]:
+    """Pick source/target where the shortest path contains 'prevents'.
+
+    Tries random pairs; if none naturally blocked, forces one edge to 'prevents'.
+    """
+    nodes = list(G.nodes())
+    edge_labels = {(u, v): G.edges[u, v].get('causal_label', 'causes')
+                   for u, v in G.edges()}
+
+    for _ in range(50):
+        source, target = random.sample(nodes, 2)
+        if not nx.has_path(G, source, target):
+            continue
+        path = nx.shortest_path(G, source, target)
+        path_labels = []
+        for i in range(len(path) - 1):
+            u, v = path[i], path[i + 1]
+            label = edge_labels.get((u, v)) or edge_labels.get((v, u), "causes")
+            path_labels.append(label)
+        if "prevents" in path_labels:
+            return source, target, path_labels
+
+    # Fallback: pick a connected pair and force one edge to "prevents"
+    source, target = random.sample(nodes, 2)
+    if not nx.has_path(G, source, target):
+        source, target = nodes[0], nodes[1]
+    path = nx.shortest_path(G, source, target)
+    if len(path) >= 2:
+        # Force the first edge to "prevents"
+        u, v = path[0], path[1]
+        key = (u, v) if (u, v) in edge_labels else (v, u)
+        edge_labels[key] = "prevents"
+        G.edges[key[0], key[1]]['causal_label'] = "prevents"
+    path_labels = []
+    for i in range(len(path) - 1):
+        u, v = path[i], path[i + 1]
+        label = edge_labels.get((u, v)) or edge_labels.get((v, u), "causes")
+        path_labels.append(label)
+    return source, target, path_labels
+
+
+def _generate_independent(
+    n_nodes: int,
+    topologies: list[str] | None,
+) -> tuple[nx.Graph, int, int, str]:
+    """Create a graph where source and target are in disconnected components.
+
+    Generates two small connected subgraphs and merges them (no cross-edges).
+    Returns (G, source, target, domain).
+    """
+    # Split nodes into two groups
+    n_a = max(3, n_nodes // 2)
+    n_b = max(3, n_nodes - n_a)
+
+    topo = random.choice(topologies) if topologies else None
+    G_a = random_graph(n_a, topology=topo)
+    G_b = random_graph(n_b, topology=topo)
+
+    # Relabel G_b nodes to avoid collision
+    offset = max(G_a.nodes()) + 1
+    G_b = nx.relabel_nodes(G_b, {n: n + offset for n in G_b.nodes()})
+
+    # Merge into single disconnected graph
+    G = nx.compose(G_a, G_b)
+
+    # Assign labels
+    domain = random.choice(list(NODE_LABEL_POOLS.keys()))
+    label_pool = NODE_LABEL_POOLS[domain]
+    for node in G.nodes():
+        G.nodes[node]['label'] = random.choice(label_pool)
+    for u, v in G.edges():
+        G.edges[u, v]['causal_label'] = random.choice(CAUSAL_LABELS)
+
+    source = random.choice(list(G_a.nodes()))
+    target = random.choice(list(G_b.nodes()))
+
+    return G, source, target, domain
+
+
 def generate_labeled_reasoning_task(
     n_nodes: int,
     embedding_dim: int,
@@ -140,43 +293,37 @@ def generate_labeled_reasoning_task(
     Task: classify the relationship type between source and target.
     3 classes: 0=causal_chain, 1=blocked, 2=independent.
 
+    Class balance is enforced by first choosing the target class uniformly
+    at random, then generating a graph that satisfies that class.
+
     Returns:
         (cc, src_node, tgt_node, answer, metadata)
         metadata: dict with 'task_type', 'task_prompt', 'node_labels', 'edge_labels'
     """
-    topo = random.choice(topologies) if topologies else None
-    G = random_graph(n_nodes, topology=topo)
+    # Force balanced class sampling
+    target_class = random.randint(0, 2)
 
-    # Assign text labels to nodes and edges
-    domain = random.choice(list(NODE_LABEL_POOLS.keys()))
-    label_pool = NODE_LABEL_POOLS[domain]
-    node_labels = {}
-    for node in G.nodes():
-        node_labels[node] = random.choice(label_pool)
-
-    edge_labels = {}
-    for u, v in G.edges():
-        edge_labels[(u, v)] = random.choice(CAUSAL_LABELS)
-
-    nodes = list(G.nodes())
-    source, target = random.sample(nodes, 2)
-
-    # Determine relationship type
-    if nx.has_path(G, source, target):
-        path = nx.shortest_path(G, source, target)
-        # Check edge labels along path
+    if target_class == 2:
+        # Independent: source and target in disconnected components
+        G, source, target, domain = _generate_independent(
+            n_nodes, topologies,
+        )
+        answer = 2
         path_labels = []
-        for i in range(len(path) - 1):
-            u, v = path[i], path[i + 1]
-            label = edge_labels.get((u, v)) or edge_labels.get((v, u), "causes")
-            path_labels.append(label)
-
-        if "prevents" in path_labels:
-            answer = 1  # blocked
-        else:
-            answer = 0  # causal chain
     else:
-        answer = 2  # independent
+        # Build a connected labeled graph
+        G, domain = _build_labeled_graph(n_nodes, topologies)
+
+        if target_class == 0:
+            # Causal chain: path exists without "prevents"
+            source, target, path_labels = _generate_causal_chain(G)
+            answer = 0
+        else:
+            # Blocked: path exists but contains "prevents"
+            source, target, path_labels = _generate_blocked(G)
+            answer = 1
+
+    node_labels, edge_labels = _extract_labels(G)
 
     cc, node_map = nx_to_cell_complex(
         G, embedding_dim,
@@ -184,13 +331,17 @@ def generate_labeled_reasoning_task(
     )
 
     # Build prompt with labels
-    edge_label_counts = {l: sum(1 for v in edge_labels.values() if v == l) for l in CAUSAL_LABELS}
+    edge_label_counts = {
+        lab: sum(1 for v in edge_labels.values() if v == lab)
+        for lab in CAUSAL_LABELS
+    }
     path_summary = ""
-    if answer != 2:  # connected
-        path_summary = f"path_len={len(path)} path_labels={','.join(path_labels)}"
+    if answer != 2:
+        path_summary = f"path_len={len(path_labels) + 1} path_labels={','.join(path_labels)}"
     metadata = {
         'task_type': 'labeled_reasoning',
-        'task_prompt': f'domain={domain} nodes={n_nodes} edges={G.number_of_edges()} '
+        'task_prompt': f'domain={domain} nodes={G.number_of_nodes()} '
+                       f'edges={G.number_of_edges()} '
                        f'causes={edge_label_counts["causes"]} '
                        f'prevents={edge_label_counts["prevents"]} '
                        f'enables={edge_label_counts["enables"]} | '
@@ -214,16 +365,20 @@ def generate_analogical_transfer_task(
     Creates two graphs with analogous semantic structure but different topology.
     Task: given a query node in graph A, identify the analogous node in graph B.
     Uses the first graph as the context (stored in cc) with both query and
-    candidate target nodes. The answer is the role index (0-4 → 5 classes).
+    candidate target nodes. The answer is the role index (0-2 -> 3 classes).
+
+    Roles are assigned by degree centrality (highest-degree nodes get roles),
+    giving the GNN a structural signal to learn from.
 
     Returns:
         (cc, query_node, candidate_node, answer, metadata)
-        answer: role index of the query node (0-4)
-        metadata: dict with 'task_type', 'task_prompt', 'domain_a', 'domain_b', 'role'
+        answer: role index of the query node (0-2)
+        metadata: dict with 'task_type', 'task_prompt', 'domain_a', 'domain_b',
+                  'role_index', 'role_name', 'role_degrees', 'avg_degree'
     """
-    # Pick a domain pair
-    domain_a, domain_b = random.choice(ANALOGY_DOMAINS)
-    num_roles = min(len(domain_a), 5)
+    # Pick a domain pair (limited to first 2 pairs for consistency)
+    domain_a, domain_b = random.choice(ANALOGY_DOMAINS[:2])
+    num_roles = 3
     roles_a = list(domain_a.keys())[:num_roles]
     roles_b = list(domain_b.keys())[:num_roles]
 
@@ -232,9 +387,12 @@ def generate_analogical_transfer_task(
     G = random_graph(max(n_nodes, num_roles + 2), topology=topo)
     nodes = list(G.nodes())
 
-    # Assign roles to first num_roles nodes
+    # Assign roles by degree centrality (highest-degree nodes get roles)
+    degrees = dict(G.degree())
+    sorted_by_degree = sorted(nodes, key=lambda n: degrees[n], reverse=True)
+    role_nodes = sorted_by_degree[:num_roles]
+
     role_assignments = {}
-    role_nodes = random.sample(nodes, num_roles)
     for i, node in enumerate(role_nodes):
         role_assignments[node] = i
 
@@ -253,6 +411,9 @@ def generate_analogical_transfer_task(
         source_node=query_node, target_node=target_node,
     )
 
+    role_degrees = [degrees[n] for n in role_nodes]
+    avg_degree = sum(degrees.values()) / len(degrees)
+
     metadata = {
         'task_type': 'analogical_transfer',
         'task_prompt': f'domain_a={",".join(roles_a)} domain_b={",".join(roles_b)} '
@@ -263,6 +424,8 @@ def generate_analogical_transfer_task(
         'domain_b': roles_b,
         'role_index': query_role_idx,
         'role_name': roles_a[query_role_idx],
+        'role_degrees': role_degrees,
+        'avg_degree': float(avg_degree),
     }
 
     return cc, node_map[query_node], node_map[target_node], answer, metadata

@@ -215,7 +215,7 @@ TASK_REGISTRY: dict[str, tuple[callable, int, dict]] = {
     "hodge_class":          (_wrap_hodge_class, 3, {}),
     "graph_completion":     (_wrap_graph_completion, 2, {}),
     "labeled_reasoning":    (_wrap_labeled_reasoning, 3, {}),
-    "analogical_transfer":  (_wrap_analogical_transfer, 5, {}),
+    "analogical_transfer":  (_wrap_analogical_transfer, 3, {}),
 }
 
 
