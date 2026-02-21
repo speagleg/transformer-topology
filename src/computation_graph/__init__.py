@@ -1,4 +1,5 @@
 from src.computation_graph.capture import ComputationGraphCapture
+from src.computation_graph.confidence import TopologicalConfidence
 from src.computation_graph.diagnostics import (
     TopologicalDiagnostics,
     TrainingTopologyMonitor,
@@ -9,6 +10,7 @@ from src.computation_graph.diagnostics import (
 
 __all__ = [
     'ComputationGraphCapture',
+    'TopologicalConfidence',
     'TopologicalDiagnostics',
     'TrainingTopologyMonitor',
     'analyze_computation_graph',
