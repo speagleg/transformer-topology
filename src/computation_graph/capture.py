@@ -227,13 +227,21 @@ class ComputationGraphCapture:
                     eidx = cc.add_1_cell(last_idx, first_idx, emb, "skip")
                     edge_indices.append(eidx)
 
-        # Add 2-cells for composite modules (those with >=2 leaf descendants)
+        # Add 2-cells for composite modules (those with >=2 leaf descendants).
+        # Only create 2-cells for contiguous runs of child leaves in the
+        # global execution order.  Non-contiguous children (common in deep
+        # architectures) would produce boundary edges that don't form a valid
+        # cycle, violating the chain complex property.
+        leaf_pos: dict[str, int] = {
+            name: i for i, name in enumerate(ordered_leaves)
+        }
+
         for name, mod in self.model.named_modules():
             children = list(mod.children())
             if len(children) < 2:
                 continue
 
-            # Find leaf descendants of this module
+            # Find leaf descendants of this module, ordered by execution
             child_leaf_names: list[str] = []
             for cname, _cmod in mod.named_modules():
                 full = f"{name}.{cname}" if (name and cname) else (name or cname)
@@ -244,40 +252,60 @@ class ComputationGraphCapture:
                 # Need at least 3 nodes to form a cycle with 3 edges
                 continue
 
-            # Find the data flow edges that connect consecutive children
-            child_idxs = {name_to_idx[n] for n in child_leaf_names}
+            # Sort by global execution position
+            child_leaf_names.sort(key=lambda n: leaf_pos.get(n, -1))
+
+            # Find contiguous runs: sequences of children that are
+            # consecutive in the global ordered_leaves list.
+            runs: list[list[str]] = []
+            current_run: list[str] = [child_leaf_names[0]]
+            for k in range(1, len(child_leaf_names)):
+                prev_pos = leaf_pos.get(child_leaf_names[k - 1], -1)
+                curr_pos = leaf_pos.get(child_leaf_names[k], -1)
+                if curr_pos == prev_pos + 1:
+                    current_run.append(child_leaf_names[k])
+                else:
+                    runs.append(current_run)
+                    current_run = [child_leaf_names[k]]
+            runs.append(current_run)
+
+            # Use the longest contiguous run (need >= 3 nodes for a 2-cell)
+            best_run = max(runs, key=len)
+            if len(best_run) < 3:
+                continue
+
+            # Collect data flow edges for consecutive nodes in the run
             boundary: list[int] = []
-            for ei in range(len(ordered_leaves) - 1):
-                src_idx = name_to_idx[ordered_leaves[ei]]
-                tgt_idx = name_to_idx[ordered_leaves[ei + 1]]
-                if src_idx in child_idxs and tgt_idx in child_idxs:
-                    boundary.append(edge_indices[ei])
+            for k in range(len(best_run) - 1):
+                pos = leaf_pos[best_run[k]]
+                # edge_indices[pos] connects ordered_leaves[pos] -> ordered_leaves[pos+1]
+                if pos < len(edge_indices):
+                    boundary.append(edge_indices[pos])
 
             if len(boundary) < 2:
                 continue
 
-            # Add a closure edge (last child -> first child) to form a cycle
-            # This is needed for a valid chain complex (B1 @ B2 = 0)
-            first_child_name = child_leaf_names[0]
-            last_child_name = child_leaf_names[-1]
+            # Add a closure edge (last -> first) to form a cycle
+            first_name = best_run[0]
+            last_name = best_run[-1]
             closure_emb = torch.zeros(embedding_dim)
-            closure_emb[0] = fwd_norms.get(last_child_name, 0.0)
-            closure_emb[1] = fwd_norms.get(first_child_name, 0.0)
+            closure_emb[0] = fwd_norms.get(last_name, 0.0)
+            closure_emb[1] = fwd_norms.get(first_name, 0.0)
             closure_idx = cc.add_1_cell(
-                name_to_idx[last_child_name], name_to_idx[first_child_name],
+                name_to_idx[last_name], name_to_idx[first_name],
                 closure_emb, "closure",
             )
             boundary.append(closure_idx)
 
             # Build 2-cell embedding
             emb = torch.zeros(embedding_dim)
-            child_fwd = [fwd_norms.get(n, 0.0) for n in child_leaf_names]
-            child_bwd = [bwd_norms.get(n, 0.0) for n in child_leaf_names]
-            if child_fwd:
-                emb[0] = sum(child_fwd) / len(child_fwd)
-            if child_bwd:
-                emb[1] = sum(child_bwd) / len(child_bwd)
-            emb[2] = float(len(child_leaf_names))
+            run_fwd = [fwd_norms.get(n, 0.0) for n in best_run]
+            run_bwd = [bwd_norms.get(n, 0.0) for n in best_run]
+            if run_fwd:
+                emb[0] = sum(run_fwd) / len(run_fwd)
+            if run_bwd:
+                emb[1] = sum(run_bwd) / len(run_bwd)
+            emb[2] = float(len(best_run))
             cc.add_2_cell(boundary, emb)
 
         return cc
