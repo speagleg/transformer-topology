@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from src.cell_complex.cell_complex import CellComplex
+
 
 class ComputationGraphCapture:
     """Context manager that hooks into PyTorch modules to capture
@@ -73,3 +75,124 @@ class ComputationGraphCapture:
                 'gradient_norm': norm,
             })
         return hook
+
+    def to_cell_complex(self, embedding_dim: int = 8) -> CellComplex:
+        """Convert captured computation graph into a CellComplex.
+
+        Mapping:
+        - Each leaf module (no children) becomes a 0-cell, ordered by forward execution.
+        - Each consecutive pair of leaf modules becomes a 1-cell (data flow edge).
+        - Each composite module (>=2 leaf children) becomes a 2-cell.
+          A closure edge (last child -> first child) is added to form a valid
+          boundary cycle so that the chain complex property B1 @ B2 = 0 holds.
+
+        Args:
+            embedding_dim: Dimension of cell embeddings.
+
+        Returns:
+            A CellComplex representing the computation graph topology.
+        """
+        cc = CellComplex(embedding_dim=embedding_dim)
+
+        # Identify leaf modules (no children)
+        leaf_names = set()
+        for name, mod in self.model.named_modules():
+            if len(list(mod.children())) == 0:
+                leaf_names.add(name)
+
+        # Order leaves by forward execution (first occurrence in forward_records)
+        seen: set[str] = set()
+        ordered_leaves: list[str] = []
+        fwd_norms: dict[str, float] = {}
+        for rec in self.forward_records:
+            name = rec['module_name']
+            if name in leaf_names and name not in seen:
+                seen.add(name)
+                ordered_leaves.append(name)
+                fwd_norms[name] = rec['activation_norm']
+
+        # Collect backward norms (last occurrence wins, which is fine)
+        bwd_norms: dict[str, float] = {}
+        for rec in self.backward_records:
+            name = rec['module_name']
+            if name in leaf_names:
+                bwd_norms[name] = rec['gradient_norm']
+
+        # Add 0-cells (one per leaf module)
+        name_to_idx: dict[str, int] = {}
+        for name in ordered_leaves:
+            emb = torch.zeros(embedding_dim)
+            emb[0] = fwd_norms.get(name, 0.0)
+            emb[1] = bwd_norms.get(name, 0.0)
+            idx = cc.add_0_cell(emb, name)
+            name_to_idx[name] = idx
+
+        # Add 1-cells for consecutive leaf pairs (data flow edges)
+        edge_indices: list[int] = []
+        for i in range(len(ordered_leaves) - 1):
+            src_name = ordered_leaves[i]
+            tgt_name = ordered_leaves[i + 1]
+            emb = torch.zeros(embedding_dim)
+            emb[0] = fwd_norms.get(src_name, 0.0)
+            emb[1] = fwd_norms.get(tgt_name, 0.0)
+            emb[2] = bwd_norms.get(tgt_name, 0.0)
+            eidx = cc.add_1_cell(
+                name_to_idx[src_name], name_to_idx[tgt_name],
+                emb, "data_flow",
+            )
+            edge_indices.append(eidx)
+
+        # Add 2-cells for composite modules (those with >=2 leaf descendants)
+        for name, mod in self.model.named_modules():
+            children = list(mod.children())
+            if len(children) < 2:
+                continue
+
+            # Find leaf descendants of this module
+            child_leaf_names: list[str] = []
+            for cname, _cmod in mod.named_modules():
+                full = f"{name}.{cname}" if (name and cname) else (name or cname)
+                if full in name_to_idx and full != name:
+                    child_leaf_names.append(full)
+
+            if len(child_leaf_names) < 3:
+                # Need at least 3 nodes to form a cycle with 3 edges
+                continue
+
+            # Find the data flow edges that connect consecutive children
+            child_idxs = {name_to_idx[n] for n in child_leaf_names}
+            boundary: list[int] = []
+            for ei in range(len(ordered_leaves) - 1):
+                src_idx = name_to_idx[ordered_leaves[ei]]
+                tgt_idx = name_to_idx[ordered_leaves[ei + 1]]
+                if src_idx in child_idxs and tgt_idx in child_idxs:
+                    boundary.append(edge_indices[ei])
+
+            if len(boundary) < 2:
+                continue
+
+            # Add a closure edge (last child -> first child) to form a cycle
+            # This is needed for a valid chain complex (B1 @ B2 = 0)
+            first_child_name = child_leaf_names[0]
+            last_child_name = child_leaf_names[-1]
+            closure_emb = torch.zeros(embedding_dim)
+            closure_emb[0] = fwd_norms.get(last_child_name, 0.0)
+            closure_emb[1] = fwd_norms.get(first_child_name, 0.0)
+            closure_idx = cc.add_1_cell(
+                name_to_idx[last_child_name], name_to_idx[first_child_name],
+                closure_emb, "closure",
+            )
+            boundary.append(closure_idx)
+
+            # Build 2-cell embedding
+            emb = torch.zeros(embedding_dim)
+            child_fwd = [fwd_norms.get(n, 0.0) for n in child_leaf_names]
+            child_bwd = [bwd_norms.get(n, 0.0) for n in child_leaf_names]
+            if child_fwd:
+                emb[0] = sum(child_fwd) / len(child_fwd)
+            if child_bwd:
+                emb[1] = sum(child_bwd) / len(child_bwd)
+            emb[2] = float(len(child_leaf_names))
+            cc.add_2_cell(boundary, emb)
+
+        return cc

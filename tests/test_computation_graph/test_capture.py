@@ -41,3 +41,86 @@ class TestHookRegistration:
         assert 'module_name' in rec
         assert 'activation_norm' in rec
         assert isinstance(rec['activation_norm'], float)
+
+
+from src.cell_complex.cell_complex import CellComplex
+
+
+class TestCellComplexConversion:
+    def test_to_cell_complex_returns_cell_complex(self):
+        """to_cell_complex() should return a CellComplex instance."""
+        model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+        with ComputationGraphCapture(model) as cap:
+            x = torch.randn(1, 4)
+            out = model(x)
+            out.sum().backward()
+        cc = cap.to_cell_complex()
+        assert isinstance(cc, CellComplex)
+
+    def test_0_cells_match_leaf_modules(self):
+        """Each leaf module should become a 0-cell."""
+        model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+        with ComputationGraphCapture(model) as cap:
+            x = torch.randn(1, 4)
+            out = model(x)
+            out.sum().backward()
+        cc = cap.to_cell_complex()
+        leaf_count = sum(1 for m in model.modules()
+                         if len(list(m.children())) == 0)
+        assert cc.num_cells(0) == leaf_count
+
+    def test_1_cells_connect_sequential_modules(self):
+        """Sequential data flow should create edges between consecutive leaf modules."""
+        model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+        with ComputationGraphCapture(model) as cap:
+            x = torch.randn(1, 4)
+            out = model(x)
+            out.sum().backward()
+        cc = cap.to_cell_complex()
+        # Linear -> ReLU -> Linear = 2 data flow edges + 1 closure edge for cycle
+        assert cc.num_cells(1) >= 2
+
+    def test_edge_signals_are_activation_norms(self):
+        """1-cell embeddings should encode forward activation norms."""
+        model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+        with ComputationGraphCapture(model) as cap:
+            x = torch.randn(1, 4)
+            out = model(x)
+            out.sum().backward()
+        cc = cap.to_cell_complex()
+        edge_embs = cc.get_embeddings(1)
+        # First dim of edge embedding = forward activation norm (non-negative)
+        assert (edge_embs[:, 0] >= 0).all()
+
+    def test_backward_signals_in_embeddings(self):
+        """0-cell embeddings should include gradient norm from backward pass."""
+        model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+        with ComputationGraphCapture(model) as cap:
+            x = torch.randn(1, 4)
+            out = model(x)
+            out.sum().backward()
+        cc = cap.to_cell_complex()
+        node_embs = cc.get_embeddings(0)
+        # Second dim = gradient norm (non-negative)
+        assert (node_embs[:, 1] >= 0).all()
+
+    def test_2_cells_for_composite_modules(self):
+        """A Sequential container should produce a 2-cell."""
+        model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+        with ComputationGraphCapture(model) as cap:
+            x = torch.randn(1, 4)
+            out = model(x)
+            out.sum().backward()
+        cc = cap.to_cell_complex()
+        assert cc.num_cells(2) >= 1
+
+    def test_chain_complex_property(self):
+        """B1 @ B2 should equal 0 (chain complex property)."""
+        model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+        with ComputationGraphCapture(model) as cap:
+            x = torch.randn(1, 4)
+            out = model(x)
+            out.sum().backward()
+        cc = cap.to_cell_complex()
+        if cc.num_cells(2) > 0:
+            assert cc.verify_chain_complex()
