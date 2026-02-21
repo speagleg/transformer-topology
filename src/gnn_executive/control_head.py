@@ -35,15 +35,19 @@ class ControlHead(nn.Module):
     per-signal outputs with appropriate activations.
     """
 
-    def __init__(self, embedding_dim: int, num_freqs: int, num_filters: int = 0):
+    def __init__(self, embedding_dim: int, num_freqs: int, num_filters: int = 0,
+                 use_topo_feedback: bool = False):
         super().__init__()
         self.num_freqs = num_freqs
         self.num_filters = num_filters
+        self.use_topo_feedback = use_topo_feedback
 
         # Shared trunk: pool → project
         # +1 for harmonic energy, +1 for log(N) size feature
+        # +3 for topo feedback (gradient_ratio, curl_ratio, spectral_gap) if enabled
+        trunk_input_dim = embedding_dim + 2 + (3 if use_topo_feedback else 0)
         self.trunk = nn.Sequential(
-            nn.Linear(embedding_dim + 2, 2 * embedding_dim),
+            nn.Linear(trunk_input_dim, 2 * embedding_dim),
             nn.GELU(),
             nn.Linear(2 * embedding_dim, embedding_dim),
             nn.GELU(),
@@ -65,7 +69,8 @@ class ControlHead(nn.Module):
             self.filter_weights_head = nn.Linear(embedding_dim, num_filters)
 
     def forward(self, node_embeddings: torch.Tensor,
-                harmonic_energy: torch.Tensor | None = None) -> ControlSignal:
+                harmonic_energy: torch.Tensor | None = None,
+                topo_features: torch.Tensor | None = None) -> ControlSignal:
         """Produce control signals from GNN node embeddings.
 
         Args:
@@ -92,6 +97,20 @@ class ControlHead(nn.Module):
         )
 
         trunk_input = torch.cat([pooled, harmonic_energy, log_n])  # (embedding_dim + 2,)
+
+        # Append topological feedback features if enabled
+        if self.use_topo_feedback:
+            if topo_features is not None:
+                topo_features = topo_features.to(pooled.device, pooled.dtype)
+                if topo_features.dim() == 0:
+                    topo_features = topo_features.unsqueeze(0)
+                trunk_input = torch.cat([trunk_input, topo_features[:3]])
+            else:
+                trunk_input = torch.cat([
+                    trunk_input,
+                    torch.zeros(3, device=pooled.device, dtype=pooled.dtype),
+                ])
+
         features = self.trunk(trunk_input)  # (embedding_dim,)
 
         # Frequency gate: sigmoid → [0,1] per spectral band
