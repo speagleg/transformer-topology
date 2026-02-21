@@ -15,6 +15,11 @@ class ComputationGraphCapture:
         self.forward_records: list[dict] = []
         self.backward_records: list[dict] = []
         self._handles: list[torch.utils.hooks.RemovableHook] = []
+        # Use data_ptr() not id() because register_full_backward_hook wraps
+        # output tensors, changing id() but preserving data_ptr().
+        self._tensor_producers: dict[int, str] = {}  # data_ptr -> module_name
+        self._tensor_consumers: list[tuple[str, str]] = []  # (producer, consumer)
+        self._output_ptrs: dict[str, int] = {}  # module_name -> output data_ptr
 
     def __enter__(self) -> 'ComputationGraphCapture':
         self._register_hooks()
@@ -39,9 +44,34 @@ class ComputationGraphCapture:
 
     def _make_forward_hook(self, module_name: str):
         def hook(module, input, output):
+            # Track input tensor consumers (skip connection detection).
+            # Use data_ptr() because register_full_backward_hook wraps
+            # tensors, changing id() but preserving data_ptr().
+            if isinstance(input, tuple):
+                for t in input:
+                    if isinstance(t, torch.Tensor):
+                        tid = t.data_ptr()
+                        if tid in self._tensor_producers:
+                            producer = self._tensor_producers[tid]
+                            if producer != module_name:
+                                self._tensor_consumers.append(
+                                    (producer, module_name)
+                                )
+            elif isinstance(input, torch.Tensor):
+                tid = input.data_ptr()
+                if tid in self._tensor_producers:
+                    producer = self._tensor_producers[tid]
+                    if producer != module_name:
+                        self._tensor_consumers.append(
+                            (producer, module_name)
+                        )
+
+            # Track output tensor producer
             if isinstance(output, torch.Tensor):
                 norm = output.detach().norm().item()
                 shape = list(output.shape)
+                self._tensor_producers[output.data_ptr()] = module_name
+                self._output_ptrs[module_name] = output.data_ptr()
             elif isinstance(output, tuple) and len(output) > 0:
                 norm = output[0].detach().norm().item() if isinstance(
                     output[0], torch.Tensor
@@ -49,6 +79,9 @@ class ComputationGraphCapture:
                 shape = list(output[0].shape) if isinstance(
                     output[0], torch.Tensor
                 ) else []
+                if isinstance(output[0], torch.Tensor):
+                    self._tensor_producers[output[0].data_ptr()] = module_name
+                    self._output_ptrs[module_name] = output[0].data_ptr()
             else:
                 norm = 0.0
                 shape = []
@@ -141,6 +174,58 @@ class ComputationGraphCapture:
                 emb, "data_flow",
             )
             edge_indices.append(eidx)
+
+        # Add skip edges from tensor tracking
+        existing_pairs = set()
+        for ei in range(len(ordered_leaves) - 1):
+            existing_pairs.add((
+                name_to_idx[ordered_leaves[ei]],
+                name_to_idx[ordered_leaves[ei + 1]],
+            ))
+        for producer, consumer in self._tensor_consumers:
+            if producer in name_to_idx and consumer in name_to_idx:
+                src_idx = name_to_idx[producer]
+                tgt_idx = name_to_idx[consumer]
+                if (src_idx, tgt_idx) not in existing_pairs:
+                    existing_pairs.add((src_idx, tgt_idx))
+                    emb = torch.zeros(embedding_dim)
+                    emb[0] = fwd_norms.get(producer, 0.0)
+                    emb[1] = fwd_norms.get(consumer, 0.0)
+                    emb[2] = bwd_norms.get(consumer, 0.0)
+                    eidx = cc.add_1_cell(src_idx, tgt_idx, emb, "skip")
+                    edge_indices.append(eidx)
+
+        # Detect residual connections: if a composite module's output differs
+        # from its last child's output, it indicates a skip/residual path.
+        for name, mod in self.model.named_modules():
+            if len(list(mod.children())) == 0:
+                continue  # leaf, skip
+            parent_ptr = self._output_ptrs.get(name)
+            if parent_ptr is None:
+                continue
+            # Find leaf descendants in execution order
+            child_leaves: list[str] = []
+            for leaf in ordered_leaves:
+                if leaf != name and (
+                    (name and leaf.startswith(name + ".")) or
+                    (not name and leaf in leaf_names)
+                ):
+                    child_leaves.append(leaf)
+            if len(child_leaves) < 2:
+                continue
+            last_child_ptr = self._output_ptrs.get(child_leaves[-1])
+            if last_child_ptr is not None and parent_ptr != last_child_ptr:
+                # Parent transforms last child's output → residual/skip path
+                first_idx = name_to_idx[child_leaves[0]]
+                last_idx = name_to_idx[child_leaves[-1]]
+                if (last_idx, first_idx) not in existing_pairs:
+                    existing_pairs.add((last_idx, first_idx))
+                    emb = torch.zeros(embedding_dim)
+                    emb[0] = fwd_norms.get(child_leaves[-1], 0.0)
+                    emb[1] = fwd_norms.get(child_leaves[0], 0.0)
+                    emb[2] = bwd_norms.get(child_leaves[0], 0.0)
+                    eidx = cc.add_1_cell(last_idx, first_idx, emb, "skip")
+                    edge_indices.append(eidx)
 
         # Add 2-cells for composite modules (those with >=2 leaf descendants)
         for name, mod in self.model.named_modules():

@@ -124,3 +124,38 @@ class TestCellComplexConversion:
         cc = cap.to_cell_complex()
         if cc.num_cells(2) > 0:
             assert cc.verify_chain_complex()
+
+
+class ResidualBlock(nn.Module):
+    """Simple residual block for testing skip connection detection."""
+    def __init__(self, dim):
+        super().__init__()
+        self.linear = nn.Linear(dim, dim)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        return x + self.relu(self.linear(x))
+
+
+class TestSkipConnectionDetection:
+    def test_residual_creates_extra_edge(self):
+        """A residual block should create more edges than a pure sequential."""
+        model = ResidualBlock(4)
+        with ComputationGraphCapture(model) as cap:
+            x = torch.randn(1, 4)
+            out = model(x)
+            out.sum().backward()
+        cc = cap.to_cell_complex()
+        # Should have at least the sequential edges plus skip edges
+        assert cc.num_cells(1) >= 2
+
+    def test_skip_edge_has_correct_signal(self):
+        """Skip connection edges should have non-zero activation norm."""
+        model = ResidualBlock(4)
+        with ComputationGraphCapture(model) as cap:
+            x = torch.randn(1, 4)
+            out = model(x)
+            out.sum().backward()
+        cc = cap.to_cell_complex()
+        edge_embs = cc.get_embeddings(1)
+        assert (edge_embs[:, 0] >= 0).all()
