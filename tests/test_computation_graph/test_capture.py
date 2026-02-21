@@ -159,3 +159,19 @@ class TestSkipConnectionDetection:
         cc = cap.to_cell_complex()
         edge_embs = cc.get_embeddings(1)
         assert (edge_embs[:, 0] >= 0).all()
+
+
+class TestModuleExports:
+    def test_top_level_imports(self):
+        """Key classes should be importable from src.computation_graph."""
+        from src.computation_graph import (
+            ComputationGraphCapture,
+            TopologicalDiagnostics,
+            TrainingTopologyMonitor,
+            analyze_computation_graph,
+            analyze_hodge,
+            analyze_spectral_gap,
+        )
+        assert ComputationGraphCapture is not None
+        assert TopologicalDiagnostics is not None
+        assert TrainingTopologyMonitor is not None
