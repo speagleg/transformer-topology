@@ -198,5 +198,38 @@ class TrainingTopologyMonitor:
             )
         return alerts
 
+    def suggestions(self, window: int = 5) -> list[str]:
+        """Analyze trends in history and return hyperparameter suggestions."""
+        if len(self.history) < window:
+            return []
+        recent = self.history[-window:]
+        suggestions: list[str] = []
+
+        curl_values = [d.curl_energy_ratio for d in recent]
+        curl_slope = (curl_values[-1] - curl_values[0]) / (window - 1)
+        if curl_slope > 0.02:
+            suggestions.append(
+                f"Rising curl energy ({curl_values[0]:.3f} -> {curl_values[-1]:.3f}). "
+                f"Consider increasing wave_damping or reducing executive loop iterations."
+            )
+
+        gap_values = [d.spectral_gap for d in recent]
+        gap_slope = (gap_values[-1] - gap_values[0]) / (window - 1)
+        if gap_slope < -0.05:
+            suggestions.append(
+                f"Declining spectral gap ({gap_values[0]:.4f} -> {gap_values[-1]:.4f}). "
+                f"Information bottleneck detected. Consider widening layers or adding skip connections."
+            )
+
+        harm_values = [d.harmonic_energy_ratio for d in recent]
+        harm_slope = (harm_values[-1] - harm_values[0]) / (window - 1)
+        if harm_slope > 0.02:
+            suggestions.append(
+                f"Rising harmonic energy ({harm_values[0]:.3f} -> {harm_values[-1]:.3f}). "
+                f"Dead subnetwork growing. Consider pruning or reinitializing affected layers."
+            )
+
+        return suggestions
+
     def reset(self):
         self.history.clear()
