@@ -36,16 +36,26 @@ class ControlHead(nn.Module):
     """
 
     def __init__(self, embedding_dim: int, num_freqs: int, num_filters: int = 0,
-                 use_topo_feedback: bool = False):
+                 use_topo_feedback: bool = False,
+                 use_embedding_topo_feedback: bool = False):
         super().__init__()
         self.num_freqs = num_freqs
         self.num_filters = num_filters
         self.use_topo_feedback = use_topo_feedback
+        self.use_embedding_topo_feedback = use_embedding_topo_feedback
 
         # Shared trunk: pool → project
         # +1 for harmonic energy, +1 for log(N) size feature
-        # +3 for topo feedback (gradient_ratio, curl_ratio, spectral_gap) if enabled
-        trunk_input_dim = embedding_dim + 2 + (3 if use_topo_feedback else 0)
+        # +3 for computation graph topo feedback if use_topo_feedback
+        # +6 for embedding topology feedback if use_embedding_topo_feedback (replaces +3)
+        if use_embedding_topo_feedback and use_topo_feedback:
+            topo_dim = 6
+        elif use_topo_feedback:
+            topo_dim = 3
+        else:
+            topo_dim = 0
+        self._topo_dim = topo_dim
+        trunk_input_dim = embedding_dim + 2 + topo_dim
         self.trunk = nn.Sequential(
             nn.Linear(trunk_input_dim, 2 * embedding_dim),
             nn.GELU(),
@@ -104,11 +114,11 @@ class ControlHead(nn.Module):
                 topo_features = topo_features.to(pooled.device, pooled.dtype)
                 if topo_features.dim() == 0:
                     topo_features = topo_features.unsqueeze(0)
-                trunk_input = torch.cat([trunk_input, topo_features[:3]])
+                trunk_input = torch.cat([trunk_input, topo_features[:self._topo_dim]])
             else:
                 trunk_input = torch.cat([
                     trunk_input,
-                    torch.zeros(3, device=pooled.device, dtype=pooled.dtype),
+                    torch.zeros(self._topo_dim, device=pooled.device, dtype=pooled.dtype),
                 ])
 
         features = self.trunk(trunk_input)  # (embedding_dim,)
