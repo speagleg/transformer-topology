@@ -30,18 +30,21 @@ class DSMBackend(nn.Module, BaseLLMBackend):
         prefix_tokens: torch.Tensor,
         topo_memory: torch.Tensor,
         task_text: str | None = None,
+        memory_key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run DSM forward pass.
 
         Args:
-            prefix_tokens: (num_prefix, dsm_dim) from TopoBridge encoder.
-            topo_memory: (N, dsm_dim) projected node embeddings.
+            prefix_tokens: (num_prefix, dsm_dim) or (num_prefix, batch, dsm_dim).
+            topo_memory: (N, dsm_dim) or (max_N, batch, dsm_dim).
             task_text: Ignored (no tokenizer in DSM). Kept for interface compat.
+            memory_key_padding_mask: (batch, max_N) bool mask where True = ignore.
 
         Returns:
-            hidden_states: (num_prefix, dsm_dim) DSM hidden states for decoder.
+            hidden_states: (num_prefix, dsm_dim) or (num_prefix, batch, dsm_dim).
         """
-        return self.dsm(prefix_tokens, topo_memory)
+        return self.dsm(prefix_tokens, topo_memory,
+                        memory_key_padding_mask=memory_key_padding_mask)
 
     def parameters(self, recurse=True):
         """All DSM parameters are trainable."""

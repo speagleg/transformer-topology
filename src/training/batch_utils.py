@@ -1,0 +1,241 @@
+"""Batched training utilities for graph-level mini-batching.
+
+Key optimization: instead of processing one graph at a time through the
+205M-param DSM, we batch B graphs' prefix tokens into a single DSM forward
+pass. The GNN and TAT operate on small graphs (20-30 nodes) and are fast
+enough to run per-graph, so we only batch the expensive DSM call.
+
+Usage:
+    from src.training.batch_utils import train_epoch_batched, evaluate_batched
+
+    loss = train_epoch_batched(
+        model, dataset, optimizer, batch_size=8,
+        device=device, use_amp=True,
+    )
+    acc, val_loss = evaluate_batched(model, dataset, batch_size=8, device=device)
+"""
+
+import random
+import torch
+import torch.nn as nn
+from src.benchmarks.run_comparison import _unpack_sample
+
+
+def graph_collate_fn(samples):
+    """Collate function for DataLoader: returns list of unpacked samples."""
+    return [_unpack_sample(s) for s in samples]
+
+
+def _forward_batch(model, batch, device):
+    """Forward pass for a batch of samples, using batched DSM when available.
+
+    Processes a list of (cc, query, target, answer, metadata) tuples.
+    Returns list of (logits, answer) pairs.
+
+    Uses model.executive_loop.forward_batched() when the model has DSM enabled,
+    otherwise falls back to sequential per-graph forward passes.
+    """
+    results = []
+
+    # Check if the model supports batched DSM forward
+    has_batched_dsm = (
+        hasattr(model, 'executive_loop')
+        and hasattr(model.executive_loop, 'forward_batched')
+        and model.executive_loop.use_dsm
+        and model.executive_loop.topo_bridge is not None
+        and not getattr(model, 'bypass_llm', False)
+    )
+
+    if has_batched_dsm:
+        # Batched path: run executive loop on all graphs simultaneously
+        ccs = []
+        queries = []
+        targets = []
+        answers = []
+        metadatas = []
+
+        for cc, query, target, answer, metadata in batch:
+            cc = cc.clone().to(device)
+            ccs.append(cc)
+            queries.append(query)
+            targets.append(target)
+            answers.append(answer)
+            metadatas.append(metadata)
+
+        # Capture initial edge embeddings for hodge features (per-graph)
+        initial_edge_embs = []
+        for cc in ccs:
+            if cc.num_cells(1) > 0:
+                initial_edge_embs.append(cc.get_embeddings(1).clone())
+            else:
+                initial_edge_embs.append(None)
+
+        # Batched executive loop (GNN per-graph, DSM batched, TAT per-graph)
+        loop_results = model.executive_loop.forward_batched(ccs)
+
+        # Per-graph classifier
+        for g, (output, num_iters, diagnostics) in enumerate(loop_results):
+            # LLM integration at model level (legacy TopoBridge path)
+            # DSM path is handled inside executive_loop already
+            if (model.use_llm and model.topo_bridge is not None
+                    and not model.bypass_llm):
+                control_signals = diagnostics.get('control_signals', [])
+                if control_signals:
+                    semantic_weight = control_signals[-1].semantic_weight
+                else:
+                    semantic_weight = torch.tensor(0.0, device=output.device)
+                task_text = None
+                if metadatas[g] and 'task_prompt' in metadatas[g]:
+                    task_text = metadatas[g]['task_prompt']
+                llm_out, _ = model.topo_bridge(output, semantic_weight, task_text)
+                output = ((1 - semantic_weight).unsqueeze(-1) * output
+                          + semantic_weight.unsqueeze(-1) * llm_out)
+
+            query_emb = output[queries[g]]
+            target_emb = output[targets[g]]
+            diff_emb = query_emb - target_emb
+            dev = query_emb.device
+
+            hodge_features = model._compute_hodge_features(
+                ccs[g], initial_edge_embs=initial_edge_embs[g],
+            ).to(dev)
+            wave_energy = model._compute_wave_energy(diagnostics).to(dev)
+            persistence_features = model._compute_persistence_features(ccs[g]).to(dev)
+
+            combined = torch.cat([query_emb, target_emb, diff_emb,
+                                  hodge_features, wave_energy, persistence_features])
+            logits = model.classifier(combined)
+            results.append((logits, answers[g]))
+    else:
+        # Sequential fallback: standard per-graph forward
+        for cc, query, target, answer, metadata in batch:
+            cc = cc.clone().to(device)
+            logits = model(cc, query, target, metadata=metadata)
+            results.append((logits, answer))
+
+    return results
+
+
+def train_epoch_batched(
+    model, dataset, optimizer, batch_size=8, max_norm=5.0,
+    label_smoothing=0.0, device=None, use_amp=False,
+):
+    """Training epoch with graph-level mini-batching.
+
+    Instead of processing one graph at a time, groups B graphs into a batch.
+    When the model has DSM, prefix tokens are batched through DSM in one pass.
+    Gradients are accumulated per-batch and a single optimizer step is taken.
+
+    Args:
+        model: HierarchicalMultiHopModel (or compatible).
+        dataset: BenchmarkDataset with .samples and __getitem__.
+        optimizer: PyTorch optimizer.
+        batch_size: Number of graphs per mini-batch.
+        max_norm: Gradient clipping norm.
+        label_smoothing: Cross-entropy label smoothing.
+        device: Target device.
+        use_amp: Whether to use bf16 autocast.
+
+    Returns:
+        Average training loss for the epoch.
+    """
+    if device is None:
+        device = torch.device('cpu')
+    model.train()
+
+    if hasattr(dataset, 'shuffle'):
+        dataset.shuffle()
+
+    amp_enabled = use_amp and device.type == 'cuda'
+    total_loss = 0.0
+    n_samples = 0
+
+    # Create mini-batches
+    indices = list(range(len(dataset)))
+    random.shuffle(indices)
+    batches = [indices[i:i + batch_size] for i in range(0, len(indices), batch_size)]
+
+    for batch_indices in batches:
+        optimizer.zero_grad()
+        samples = [_unpack_sample(dataset[i]) for i in batch_indices]
+
+        with torch.amp.autocast('cuda', enabled=amp_enabled, dtype=torch.bfloat16):
+            results = _forward_batch(model, samples, device)
+
+            # Compute batch loss
+            batch_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            valid_count = 0
+            for logits, answer in results:
+                loss = torch.nn.functional.cross_entropy(
+                    logits.unsqueeze(0),
+                    torch.tensor([answer], device=device),
+                    label_smoothing=label_smoothing,
+                )
+                if not (torch.isnan(loss) or torch.isinf(loss)):
+                    batch_loss = batch_loss + loss
+                    valid_count += 1
+
+            if valid_count > 0:
+                batch_loss = batch_loss / valid_count
+
+        if valid_count > 0 and not (torch.isnan(batch_loss) or torch.isinf(batch_loss)):
+            batch_loss.backward()
+            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            if torch.isfinite(gn):
+                optimizer.step()
+            total_loss += batch_loss.item() * valid_count
+            n_samples += valid_count
+
+    return total_loss / max(n_samples, 1)
+
+
+@torch.no_grad()
+def evaluate_batched(
+    model, dataset, batch_size=8, label_smoothing=0.0, device=None,
+):
+    """Evaluate model with graph-level mini-batching.
+
+    Args:
+        model: HierarchicalMultiHopModel (or compatible).
+        dataset: BenchmarkDataset.
+        batch_size: Number of graphs per mini-batch.
+        label_smoothing: Cross-entropy label smoothing.
+        device: Target device.
+
+    Returns:
+        (accuracy, average_loss) tuple.
+    """
+    if device is None:
+        device = torch.device('cpu')
+    model.eval()
+
+    correct = 0
+    total_loss = 0.0
+    n_valid = 0
+    n_total = 0
+
+    indices = list(range(len(dataset)))
+    batches = [indices[i:i + batch_size] for i in range(0, len(indices), batch_size)]
+
+    for batch_indices in batches:
+        samples = [_unpack_sample(dataset[i]) for i in batch_indices]
+        results = _forward_batch(model, samples, device)
+
+        for logits, answer in results:
+            loss = torch.nn.functional.cross_entropy(
+                logits.unsqueeze(0),
+                torch.tensor([answer], device=device),
+                label_smoothing=label_smoothing,
+            )
+            loss_val = loss.item()
+            if loss_val == loss_val and loss_val != float('inf'):
+                total_loss += loss_val
+                n_valid += 1
+            pred = logits.argmax().item()
+            if pred == answer:
+                correct += 1
+            n_total += 1
+
+    accuracy = correct / max(n_total, 1)
+    avg_loss = total_loss / max(n_valid, 1)
+    return accuracy, avg_loss

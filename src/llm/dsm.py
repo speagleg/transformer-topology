@@ -69,21 +69,26 @@ class DSMCrossAttentionBlock(nn.Module):
         )
         self.norm2 = nn.LayerNorm(hidden_dim)
 
-    def forward(self, x: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, memory: torch.Tensor,
+                memory_key_padding_mask: torch.Tensor | None = None) -> torch.Tensor:
         """Self-attention + cross-attention over topo_memory + FFN.
 
         Args:
-            x: (seq_len, hidden_dim) token sequence.
-            memory: (N, hidden_dim) topo_memory from TopoBridge encoder.
+            x: (seq_len, hidden_dim) or (seq_len, batch, hidden_dim).
+            memory: (N, hidden_dim) or (N, batch, hidden_dim).
+            memory_key_padding_mask: (batch, N) bool mask where True = ignore.
 
         Returns:
-            (seq_len, hidden_dim)
+            Same shape as x.
         """
         normed = self.norm1(x)
         attn_out, _ = self.self_attn(normed, normed, normed)
         x = x + attn_out
         normed = self.norm_cross(x)
-        cross_out, _ = self.cross_attn(normed, memory, memory)
+        cross_out, _ = self.cross_attn(
+            normed, memory, memory,
+            key_padding_mask=memory_key_padding_mask,
+        )
         x = x + cross_out
         x = x + self.ff(self.norm2(x))
         return x
@@ -124,16 +129,21 @@ class DistilledSemanticModel(nn.Module):
         self.final_norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, prefix: torch.Tensor, topo_memory: torch.Tensor,
-                task_tokens: torch.Tensor | None = None) -> torch.Tensor:
+                task_tokens: torch.Tensor | None = None,
+                memory_key_padding_mask: torch.Tensor | None = None) -> torch.Tensor:
         """DSM forward pass.
 
+        Supports both unbatched (2D) and batched (3D) inputs.
+
         Args:
-            prefix: (num_prefix, hidden_dim) from TopoBridge PrefixGenerator.
-            topo_memory: (N, hidden_dim) projected node embeddings.
+            prefix: (num_prefix, hidden_dim) or (num_prefix, batch, hidden_dim).
+            topo_memory: (N, hidden_dim) or (max_N, batch, hidden_dim).
             task_tokens: (seq, hidden_dim) optional embedded task text.
+            memory_key_padding_mask: (batch, max_N) bool mask where True = ignore.
+                Only used when inputs are batched.
 
         Returns:
-            semantic_hidden: (num_prefix + seq, hidden_dim) hidden states.
+            semantic_hidden: (num_prefix + seq, hidden_dim) or batched equivalent.
         """
         if task_tokens is not None:
             x = torch.cat([prefix, task_tokens], dim=0)
@@ -141,7 +151,8 @@ class DistilledSemanticModel(nn.Module):
             x = prefix
         for i, layer in enumerate(self.layers):
             if i == self.cross_attn_layer:
-                x = layer(x, topo_memory)
+                x = layer(x, topo_memory,
+                          memory_key_padding_mask=memory_key_padding_mask)
             else:
                 x = layer(x)
         return self.final_norm(x)

@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.llm.backend import BaseLLMBackend
 
@@ -54,6 +55,47 @@ class TopoBridgeEncoder(nn.Module):
 
         return topo_memory, prefix_tokens
 
+    def forward_batched(
+        self, node_embeddings_list: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
+        """Batched encode: pad variable-size node embeddings and run in one pass.
+
+        Args:
+            node_embeddings_list: List of B tensors, each (N_i, topo_dim).
+
+        Returns:
+            topo_memory: (max_N, B, llm_dim) padded projected nodes.
+            prefix_tokens: (K, B, llm_dim) prefix tokens per graph.
+            memory_mask: (B, max_N) bool mask, True = padding position.
+            sizes: list of N_i per graph (for unpadding).
+        """
+        B = len(node_embeddings_list)
+        sizes = [ne.shape[0] for ne in node_embeddings_list]
+        max_N = max(sizes)
+        device = node_embeddings_list[0].device
+
+        # Pad and stack node embeddings: (B, max_N, topo_dim)
+        padded = torch.zeros(B, max_N, self.topo_dim, device=device)
+        memory_mask = torch.ones(B, max_N, dtype=torch.bool, device=device)
+        for i, ne in enumerate(node_embeddings_list):
+            padded[i, :sizes[i]] = ne
+            memory_mask[i, :sizes[i]] = False  # False = attend
+
+        # Project: (B, max_N, topo_dim) → (B, max_N, llm_dim)
+        topo_memory_bnd = self.node_proj(padded)  # (B, max_N, llm_dim)
+        # Reshape to (max_N, B, llm_dim) for batch_first=False MHA
+        topo_memory = topo_memory_bnd.transpose(0, 1)  # (max_N, B, llm_dim)
+
+        # Generate prefix tokens via batched cross-attention
+        # queries: (K, B, llm_dim), kv: (max_N, B, llm_dim)
+        queries = self.prefix_queries.unsqueeze(1).expand(-1, B, -1)  # (K, B, llm_dim)
+        prefix_tokens, _ = self.prefix_attn(
+            queries, topo_memory, topo_memory,
+            key_padding_mask=memory_mask,
+        )  # (K, B, llm_dim)
+
+        return topo_memory, prefix_tokens, memory_mask, sizes
+
 
 class TopoBridgeDecoder(nn.Module):
     """Extracts node-aligned embeddings and semantic bias from LLM hidden states."""
@@ -103,6 +145,51 @@ class TopoBridgeDecoder(nn.Module):
 
         return llm_out, semantic_bias
 
+    def forward_batched(
+        self,
+        topo_memory: torch.Tensor,
+        llm_hidden: torch.Tensor,
+        memory_mask: torch.Tensor,
+        sizes: list[int],
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """Batched decode: extract per-graph node embeddings + semantic bias.
+
+        Args:
+            topo_memory: (max_N, B, llm_dim) padded projected nodes.
+            llm_hidden: (K, B, llm_dim) DSM output.
+            memory_mask: (B, max_N) bool mask, True = padding.
+            sizes: list of N_i per graph.
+
+        Returns:
+            List of (llm_out_i, semantic_bias_i) tuples, one per graph.
+            llm_out_i: (N_i, topo_dim), semantic_bias_i: (N_i, N_i).
+        """
+        B = topo_memory.shape[1]
+
+        # Cross-attention: node queries attend over DSM hidden states
+        # queries: (max_N, B, llm_dim), kv: (K, B, llm_dim)
+        # Need query padding mask to avoid garbage output for padding positions
+        # But MHA doesn't have query_padding_mask — we just ignore padding outputs
+        attn_out, _ = self.cross_attn(topo_memory, llm_hidden, llm_hidden)
+        # (max_N, B, llm_dim)
+
+        # Reshape to (B, max_N, llm_dim) for per-sample processing
+        attn_out = attn_out.transpose(0, 1)  # (B, max_N, llm_dim)
+
+        # Project to topo space: (B, max_N, topo_dim)
+        llm_out_batched = self.out_proj(attn_out)
+
+        # Unpad and compute per-graph semantic bias
+        results = []
+        for i in range(B):
+            n_i = sizes[i]
+            llm_out_i = llm_out_batched[i, :n_i]  # (N_i, topo_dim)
+            projected = self.semantic_bias_proj(llm_out_i)  # (N_i, topo_dim)
+            semantic_bias_i = projected @ projected.T  # (N_i, N_i)
+            results.append((llm_out_i, semantic_bias_i))
+
+        return results
+
 
 class TopoBridge(nn.Module):
     """Composes encoder + LLM backend + decoder for topo→LLM→topo round trip."""
@@ -148,3 +235,36 @@ class TopoBridge(nn.Module):
         llm_out, semantic_bias = self.decoder(topo_memory, llm_hidden)
 
         return llm_out, semantic_bias
+
+    def forward_batched(
+        self,
+        node_embeddings_list: list[torch.Tensor],
+        semantic_weights: list[torch.Tensor],
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """Batched TopoBridge: process multiple graphs through DSM in one pass.
+
+        This is the key optimization for GPU utilization. Instead of running
+        B individual DSM forward passes (each on 8 prefix tokens), we batch
+        them into a single pass with B*8 tokens.
+
+        Args:
+            node_embeddings_list: List of B tensors, each (N_i, topo_dim).
+            semantic_weights: List of B scalar tensors (unused here, kept for API).
+
+        Returns:
+            List of (llm_out_i, semantic_bias_i) tuples, one per graph.
+        """
+        # Batched encode
+        topo_memory, prefix_tokens, memory_mask, sizes = \
+            self.encoder.forward_batched(node_embeddings_list)
+
+        # Batched DSM forward
+        llm_hidden = self.backend.forward(
+            prefix_tokens, topo_memory,
+            memory_key_padding_mask=memory_mask,
+        )  # (K, B, dsm_dim)
+
+        # Batched decode
+        return self.decoder.forward_batched(
+            topo_memory, llm_hidden, memory_mask, sizes,
+        )

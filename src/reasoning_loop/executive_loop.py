@@ -208,14 +208,16 @@ class ExecutiveReasoningLoop(nn.Module):
             diagnostics['control_signals'].append(control)
 
             # 2. Wave dynamics (optional): temporal propagation
+            #    Force fp32 — spectral decomposition + neural ODE overflow in bf16.
             if self.use_wave_dynamics:
-                wave_out = self.wave_dynamics(
-                    cc, gnn_out,
-                    diffusion_time=control.diffusion_time,
-                    wave_damping=control.wave_damping,
-                    filter_weights=control.filter_weights,
-                )
-                gnn_out = gnn_out + wave_out  # residual addition
+                with torch.amp.autocast('cuda', enabled=False):
+                    wave_out = self.wave_dynamics(
+                        cc, gnn_out.float(),
+                        diffusion_time=control.diffusion_time.float(),
+                        wave_damping=control.wave_damping.float(),
+                        filter_weights=control.filter_weights.float() if control.filter_weights is not None else None,
+                    )
+                gnn_out = gnn_out + wave_out.to(gnn_out.dtype)  # residual addition
 
             # 2.5. DSM: encode → DSM forward → decode → semantic_bias
             semantic_bias = None
@@ -264,3 +266,102 @@ class ExecutiveReasoningLoop(nn.Module):
             prev_harmonic_energy = current_harmonic_energy
 
         return current_embeddings, num_iters, diagnostics
+
+    def forward_batched(
+        self, ccs: list[CellComplex],
+    ) -> list[tuple[torch.Tensor, int, dict]]:
+        """Batched executive loop: process multiple graphs with batched DSM.
+
+        Per iteration:
+          1. Per-graph GNN + wave (cheap, sequential)
+          2. Batched DSM call if enabled (expensive, NOW BATCHED)
+          3. Per-graph TAT + integration (cheap, sequential)
+
+        Uses fixed max_iterations (no per-graph convergence stopping) to keep
+        graphs synchronized for batched DSM calls.
+
+        Args:
+            ccs: List of B CellComplexes.
+
+        Returns:
+            List of (embeddings, num_iters, diagnostics) per graph.
+        """
+        B = len(ccs)
+
+        # Initialize structural features per graph
+        if self.use_structural_features:
+            for cc in ccs:
+                struct_feat = self.structural_encoder(cc)
+                cc.set_embeddings(0, (cc.get_embeddings(0) + struct_feat).detach())
+
+        prev_embeddings = [cc.get_embeddings(0) for cc in ccs]
+        all_diagnostics = [
+            {'harmonic_energies': [], 'convergence_deltas': [], 'control_signals': []}
+            for _ in range(B)
+        ]
+        current_embeddings = [None] * B
+
+        for iteration in range(self.max_iterations):
+            # Phase 1: Per-graph GNN + wave (cheap)
+            gnn_outputs = []
+            for g in range(B):
+                harmonic_energy = self._compute_harmonic_energy(ccs[g]).detach()
+                gnn_out, edge_out, control = self.gnn_executive.forward_with_control(
+                    ccs[g], harmonic_energy=harmonic_energy,
+                )
+                all_diagnostics[g]['control_signals'].append(control)
+
+                if self.use_wave_dynamics:
+                    with torch.amp.autocast('cuda', enabled=False):
+                        wave_out = self.wave_dynamics(
+                            ccs[g], gnn_out.float(),
+                            diffusion_time=control.diffusion_time.float(),
+                            wave_damping=control.wave_damping.float(),
+                            filter_weights=(control.filter_weights.float()
+                                            if control.filter_weights is not None else None),
+                        )
+                    gnn_out = gnn_out + wave_out.to(gnn_out.dtype)
+
+                gnn_outputs.append((gnn_out, edge_out, control))
+
+            # Phase 2: Batched DSM call (expensive, NOW BATCHED)
+            semantic_biases = [None] * B
+            if self.use_dsm and self.topo_bridge is not None:
+                node_embs_list = [go[0] for go in gnn_outputs]
+                semantic_weights = [go[2].semantic_weight for go in gnn_outputs]
+                dsm_results = self.topo_bridge.forward_batched(
+                    node_embs_list, semantic_weights,
+                )
+                for g, (_, sb) in enumerate(dsm_results):
+                    semantic_biases[g] = sb
+
+            # Phase 3: Per-graph TAT + integration (cheap)
+            for g in range(B):
+                gnn_out, edge_out, control = gnn_outputs[g]
+                ccs[g].set_embeddings(0, gnn_out.detach())
+
+                tat_out = self.tat(
+                    ccs[g], control_signal=control,
+                    semantic_bias=semantic_biases[g],
+                    semantic_weight=control.semantic_weight if self.use_dsm else None,
+                )
+
+                confidence = control.confidence_weights.unsqueeze(-1)
+                integrated = confidence * tat_out + (1 - confidence) * gnn_out
+                current_embeddings[g] = self.norm(integrated + prev_embeddings[g])
+
+                ccs[g].set_embeddings(0, current_embeddings[g].detach())
+
+                if edge_out is not None:
+                    old_edge = ccs[g].get_embeddings(1)
+                    r = self.edge_residual_ratio
+                    blended = (1 - r) * edge_out + r * old_edge
+                    ccs[g].set_embeddings(1, blended.detach())
+
+            prev_embeddings = [ce.clone() for ce in current_embeddings]
+
+        # Build return values
+        results = []
+        for g in range(B):
+            results.append((current_embeddings[g], self.max_iterations, all_diagnostics[g]))
+        return results
