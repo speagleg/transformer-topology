@@ -293,6 +293,14 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
             print("  TopoBridge moved to GPU")
         _unfreeze_llm(model)
 
+        # Reset semantic gate bias (see comment in Phase A→B transition)
+        for name, param in model.named_parameters():
+            if 'semantic_weight_head.bias' in name:
+                old_val = param.data.item()
+                param.data.fill_(0.0)
+                print(f"  Reset semantic gate bias: {old_val:.2f} -> 0.0 (sigmoid 0.05 -> 0.50)")
+                break
+
     # ---- Phase A: Regression Lock ----
     phase_a = cc.get("phase_a", {})
     if phase_a.get("enabled", True) and not skip_a:
@@ -408,6 +416,17 @@ def run_curriculum(config_path: str = "config/benchmark_4c_llm.yaml",
             model.topo_bridge.to(device)
             print("  TopoBridge moved back to GPU")
         _unfreeze_llm(model)
+
+        # Reset semantic gate bias so LLM has 50% influence at Phase B start.
+        # Phase A penalized it to sigmoid(-3)=5%; without reset, bridge can't
+        # bootstrap (cold-start trap: weak gate → weak gradients → gate stays weak).
+        for name, param in model.named_parameters():
+            if 'semantic_weight_head.bias' in name:
+                old_val = param.data.item()
+                param.data.fill_(0.0)  # sigmoid(0) = 0.5
+                print(f"  Reset semantic gate bias: {old_val:.2f} -> 0.0 (sigmoid 0.05 -> 0.50)")
+                break
+        print("  Re-enabled DSM + unfroze params for Phase B")
 
     # ---- Phase B: Graph Completion ----
     phase_b = cc.get("phase_b", {})

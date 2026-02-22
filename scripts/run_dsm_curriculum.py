@@ -39,8 +39,15 @@ PHASE_C_TASKS = ["analogical_transfer", "graph_completion", "labeled_reasoning"]
 
 
 def _rebuild_classifier(model, task: str):
-    """Rebuild classifier head for the current task's num_classes."""
+    """Rebuild classifier head for the current task's num_classes.
+
+    Idempotent: only creates a new Linear layer if the output dimension
+    doesn't match.  This prevents destroying trained weights when called
+    repeatedly within the same task.
+    """
     num_classes = get_max_classes(task)
+    if model.classifier[-1].out_features == num_classes:
+        return  # Already correct size — keep trained weights
     old_in = model.classifier[-1].in_features
     model.classifier[-1] = torch.nn.Linear(old_in, num_classes)
     model.classifier[-1].to(next(model.parameters()).device)
@@ -131,11 +138,14 @@ def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
 
 def train_epoch_with_replay(model, dataset, replay_samples, optimizer,
                             max_norm=5.0, accumulation_steps=4,
-                            label_smoothing=0.0, device=None, use_amp=False):
+                            label_smoothing=0.0, device=None, use_amp=False,
+                            main_task=None):
     """Training loop that interleaves replay samples from earlier phases.
 
     replay_samples is a list of (sample, task_type) tuples. For each replay
     sample, the classifier is temporarily rebuilt for that task.
+    main_task: the primary task name, used to restore the classifier after
+    replay samples from different tasks.
     """
     if device is None:
         device = torch.device('cpu')
@@ -157,22 +167,24 @@ def train_epoch_with_replay(model, dataset, replay_samples, optimizer,
     schedule.extend([('replay', i) for i in replay_indices])
     random.shuffle(schedule)
 
-    # Remember the current task's num_classes to avoid unnecessary rebuilds
-    current_task = None
-    main_task = None  # Will be set from dataset metadata or left as None
+    # Track whether a replay sample changed the classifier away from main task
+    on_replay_task = False
 
     step_count = 0
     for source, idx in schedule:
         if source == 'main':
             sample = dataset[idx]
             cc, query, target, answer, metadata = _unpack_sample(sample)
+            # Restore main task classifier if replay changed it
+            if on_replay_task and main_task is not None:
+                _rebuild_classifier(model, main_task)
+                on_replay_task = False
         else:
             sample, replay_task = replay_samples[idx]
             cc, query, target, answer, metadata = _unpack_sample(sample)
             # Rebuild classifier for replay task if needed
-            if replay_task != current_task:
-                _rebuild_classifier(model, replay_task)
-                current_task = replay_task
+            _rebuild_classifier(model, replay_task)
+            on_replay_task = True
 
         cc = cc.clone().to(device)
 
@@ -319,6 +331,7 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     label_smoothing=label_smoothing,
                     device=device,
                     use_amp=use_amp,
+                    main_task=task,
                 )
             else:
                 loss = train_epoch(
@@ -432,7 +445,9 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total params: {total_params:,}, Trainable: {trainable_params:,}")
 
-    use_amp = device.type == 'cuda'
+    # bf16 autocast causes NaN in spectral/ODE ops — disable until we add
+    # per-op exclusions or GradScaler.  fp32 is ~2x slower but actually learns.
+    use_amp = False
     all_results = {}
 
     # ---- Resume from checkpoint if requested ----
@@ -471,13 +486,32 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
     phase_a_datasets = {}
     if not skip_a:
         print(f"\n{'=' * 72}")
-        print("Phase A: Structural Foundation (DSM active, learns not to interfere)")
+        print("Phase A: Structural Foundation (DSM frozen, GNN/TAT learns)")
         print(f"{'=' * 72}")
+
+        # Disable DSM entirely during Phase A — skip the 205M-param forward
+        # pass (runs 5x per sample in the executive loop).  Phase A is pure
+        # structural tasks; DSM contributes nothing (semantic_weight ≈ 0.05).
+        # Also freeze params so backward skips them too.
+        model.executive_loop.use_dsm = False
+        frozen_params = []
+        for name, param in model.named_parameters():
+            if 'topo_bridge' in name or 'dsm' in name.lower():
+                param.requires_grad_(False)
+                frozen_params.append(name)
+        print(f"  Disabled DSM forward + frozen {len(frozen_params)} param tensors")
 
         phase_a_results, phase_a_datasets = _run_phase(
             'a', PHASE_A_TASKS, model, config, device, pregen_dir,
             train_range, all_topos, checkpoint_dir, use_amp,
         )
+
+        # Re-enable DSM + unfreeze for subsequent phases
+        model.executive_loop.use_dsm = True
+        for name, param in model.named_parameters():
+            if 'topo_bridge' in name or 'dsm' in name.lower():
+                param.requires_grad_(True)
+        print(f"  Re-enabled DSM + unfroze params for Phase B")
         for task, acc in phase_a_results.items():
             all_results[f"phase_a_{task}"] = {"best_val_acc": acc}
 

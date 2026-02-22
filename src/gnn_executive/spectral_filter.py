@@ -63,12 +63,14 @@ class SpectralGNN(nn.Module):
         Returns:
             Output features of shape (N, out_dim).
         """
-        x = cc.get_embeddings(0)
-        eigenvalues, eigenvectors = spectral_decomposition(cc, dim=0, k=self.max_freqs)
-        x = self.input_proj(x)
-        for layer in self.layers:
-            residual = x
-            x = layer(x, eigenvalues, eigenvectors)
-            if residual.shape == x.shape:
-                x = x + residual
-        return self.output_proj(x)
+        # Force fp32 — eigendecomposition and spectral matmuls overflow in bf16.
+        with torch.amp.autocast('cuda', enabled=False):
+            x = cc.get_embeddings(0).float()
+            eigenvalues, eigenvectors = spectral_decomposition(cc, dim=0, k=self.max_freqs)
+            x = self.input_proj(x)
+            for layer in self.layers:
+                residual = x
+                x = layer(x, eigenvalues, eigenvectors)
+                if residual.shape == x.shape:
+                    x = x + residual
+            return self.output_proj(x)

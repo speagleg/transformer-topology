@@ -43,6 +43,13 @@ class TopologicalSpectralAttention(nn.Module):
         Returns:
             Output tensor of shape (n, embed_dim).
         """
+        # Force fp32 — spectral einsum operations overflow in bf16.
+        input_dtype = x.dtype
+        x = x.float()
+        eigenvalues = eigenvalues.float()
+        eigenvectors = eigenvectors.float()
+        if frequency_gate is not None:
+            frequency_gate = frequency_gate.float()
         n = x.shape[0]
         k = min(self.num_freqs, eigenvectors.shape[1])
         residual = x
@@ -79,4 +86,4 @@ class TopologicalSpectralAttention(nn.Module):
         out = torch.einsum("nh,nhd->nhd", out_spatial, v)
         out = out.contiguous().view(n, self.embed_dim)
         out = self.out_proj(out)
-        return self.norm(out + residual)
+        return self.norm(out + residual).to(input_dtype)

@@ -92,7 +92,7 @@ class LlamaBackend(nn.Module, BaseLLMBackend):
         # Load frozen model in bf16 to halve memory footprint
         self.llama = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map=None,
         )
         for param in self.llama.parameters():
