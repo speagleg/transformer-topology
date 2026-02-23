@@ -23,7 +23,8 @@ model:
 
 wave:
   wave_mode: ensemble
-  filter_types: [chebyshev, wave_cosine, heat, identity]
+  filter_types: [chebyshev, wave_cosine, heat]
+  include_identity: true
   wave_strength_gate: true
   use_neural_ode: true
 
