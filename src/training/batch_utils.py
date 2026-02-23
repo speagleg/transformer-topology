@@ -26,11 +26,15 @@ def graph_collate_fn(samples):
     return [_unpack_sample(s) for s in samples]
 
 
-def _forward_batch(model, batch, device):
+def _forward_batch(model, batch, device, task=None, topo_features=None):
     """Forward pass for a batch of samples, using batched DSM when available.
 
     Processes a list of (cc, query, target, answer, metadata) tuples.
     Returns list of (logits, answer) pairs.
+
+    Args:
+        task: Optional task name for multi-head classifier.
+        topo_features: Optional topology features tensor for ControlHead.
 
     Uses model.executive_loop.forward_batched() when the model has DSM enabled,
     otherwise falls back to sequential per-graph forward passes.
@@ -70,8 +74,15 @@ def _forward_batch(model, batch, device):
             else:
                 initial_edge_embs.append(None)
 
+        # Build per-graph topo_features list if provided
+        topo_features_list = None
+        if topo_features is not None:
+            topo_features_list = [topo_features] * len(ccs)
+
         # Batched executive loop (GNN per-graph, DSM batched, TAT per-graph)
-        loop_results = model.executive_loop.forward_batched(ccs)
+        loop_results = model.executive_loop.forward_batched(
+            ccs, topo_features_list=topo_features_list,
+        )
 
         # Per-graph classifier
         for g, (output, num_iters, diagnostics) in enumerate(loop_results):
@@ -87,7 +98,7 @@ def _forward_batch(model, batch, device):
                 task_text = None
                 if metadatas[g] and 'task_prompt' in metadatas[g]:
                     task_text = metadatas[g]['task_prompt']
-                llm_out, _ = model.topo_bridge(output, semantic_weight, task_text)
+                llm_out, _, _, _ = model.topo_bridge(output, semantic_weight, task_text)
                 output = ((1 - semantic_weight).unsqueeze(-1) * output
                           + semantic_weight.unsqueeze(-1) * llm_out)
 
@@ -104,13 +115,17 @@ def _forward_batch(model, batch, device):
 
             combined = torch.cat([query_emb, target_emb, diff_emb,
                                   hodge_features, wave_energy, persistence_features])
-            logits = model.classifier(combined)
+            if task is not None and getattr(model, 'multi_head_classifier', None) is not None:
+                logits = model.multi_head_classifier(combined.unsqueeze(0), task).squeeze(0)
+            else:
+                logits = model.classifier(combined)
             results.append((logits, answers[g]))
     else:
         # Sequential fallback: standard per-graph forward
         for cc, query, target, answer, metadata in batch:
             cc = cc.clone().to(device)
-            logits = model(cc, query, target, metadata=metadata)
+            logits = model(cc, query, target, metadata=metadata,
+                           topo_features=topo_features, task=task)
             results.append((logits, answer))
 
     return results
@@ -119,6 +134,7 @@ def _forward_batch(model, batch, device):
 def train_epoch_batched(
     model, dataset, optimizer, batch_size=8, max_norm=5.0,
     label_smoothing=0.0, device=None, use_amp=False,
+    task=None, topo_features=None,
 ):
     """Training epoch with graph-level mini-batching.
 
@@ -135,6 +151,8 @@ def train_epoch_batched(
         label_smoothing: Cross-entropy label smoothing.
         device: Target device.
         use_amp: Whether to use bf16 autocast.
+        task: Optional task name for multi-head classifier.
+        topo_features: Optional topology features tensor for ControlHead.
 
     Returns:
         Average training loss for the epoch.
@@ -160,7 +178,8 @@ def train_epoch_batched(
         samples = [_unpack_sample(dataset[i]) for i in batch_indices]
 
         with torch.amp.autocast('cuda', enabled=amp_enabled, dtype=torch.bfloat16):
-            results = _forward_batch(model, samples, device)
+            results = _forward_batch(model, samples, device, task=task,
+                                     topo_features=topo_features)
 
             # Compute batch loss
             batch_loss = torch.tensor(0.0, device=device, requires_grad=True)
@@ -192,6 +211,7 @@ def train_epoch_batched(
 @torch.no_grad()
 def evaluate_batched(
     model, dataset, batch_size=8, label_smoothing=0.0, device=None,
+    task=None,
 ):
     """Evaluate model with graph-level mini-batching.
 
@@ -201,6 +221,7 @@ def evaluate_batched(
         batch_size: Number of graphs per mini-batch.
         label_smoothing: Cross-entropy label smoothing.
         device: Target device.
+        task: Optional task name for multi-head classifier.
 
     Returns:
         (accuracy, average_loss) tuple.
@@ -219,7 +240,7 @@ def evaluate_batched(
 
     for batch_indices in batches:
         samples = [_unpack_sample(dataset[i]) for i in batch_indices]
-        results = _forward_batch(model, samples, device)
+        results = _forward_batch(model, samples, device, task=task)
 
         for logits, answer in results:
             loss = torch.nn.functional.cross_entropy(

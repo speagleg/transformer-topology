@@ -51,7 +51,9 @@ class ExecutiveReasoningLoop(nn.Module):
                  wave_filter_kwargs: dict | None = None,
                  wave_mode: str = 'spectral',
                  use_dsm: bool = False,
-                 dsm_config: dict | None = None):
+                 dsm_config: dict | None = None,
+                 use_topo_feedback: bool = False,
+                 use_embedding_topo_feedback: bool = False):
         super().__init__()
         self.max_iterations = max_iterations
         self.convergence_threshold = convergence_threshold
@@ -103,6 +105,8 @@ class ExecutiveReasoningLoop(nn.Module):
             produce_control_signals=True,
             use_higher_order=use_higher_order,
             num_filters=num_filters,
+            use_topo_feedback=use_topo_feedback,
+            use_embedding_topo_feedback=use_embedding_topo_feedback,
         )
 
         self.tat = TopologyAwareTransformer(
@@ -162,7 +166,9 @@ class ExecutiveReasoningLoop(nn.Module):
         except (RuntimeError, ValueError):
             return torch.tensor(0.0, device=cc.device)
 
-    def forward(self, cc: CellComplex) -> tuple[torch.Tensor, int, dict]:
+    def forward(self, cc: CellComplex,
+                topo_features: torch.Tensor | None = None,
+                ) -> tuple[torch.Tensor, int, dict]:
         """Run the hierarchical executive reasoning loop.
 
         Each iteration:
@@ -174,6 +180,8 @@ class ExecutiveReasoningLoop(nn.Module):
 
         Args:
             cc: Input CellComplex with 0-cells and 1-cells.
+            topo_features: Optional 6-feature tensor from TopologyObserver
+                for active topology feedback to ControlHead.
 
         Returns:
             Tuple of (final_embeddings, num_iterations, diagnostics).
@@ -204,6 +212,7 @@ class ExecutiveReasoningLoop(nn.Module):
             harmonic_energy_input = prev_harmonic_energy.detach()
             gnn_out, edge_out, control = self.gnn_executive.forward_with_control(
                 cc, harmonic_energy=harmonic_energy_input,
+                topo_features=topo_features,
             )
             diagnostics['control_signals'].append(control)
 
@@ -224,7 +233,7 @@ class ExecutiveReasoningLoop(nn.Module):
             semantic_weight = None
             if self.use_dsm and self.topo_bridge is not None:
                 semantic_weight = control.semantic_weight
-                _, semantic_bias = self.topo_bridge(gnn_out, semantic_weight)
+                _, semantic_bias, _, _ = self.topo_bridge(gnn_out, semantic_weight)
 
             # Update cell complex for TAT (detach for graph safety)
             cc.set_embeddings(0, gnn_out.detach())
@@ -269,6 +278,7 @@ class ExecutiveReasoningLoop(nn.Module):
 
     def forward_batched(
         self, ccs: list[CellComplex],
+        topo_features_list: list[torch.Tensor] | None = None,
     ) -> list[tuple[torch.Tensor, int, dict]]:
         """Batched executive loop: process multiple graphs with batched DSM.
 
@@ -306,8 +316,10 @@ class ExecutiveReasoningLoop(nn.Module):
             gnn_outputs = []
             for g in range(B):
                 harmonic_energy = self._compute_harmonic_energy(ccs[g]).detach()
+                topo_feat = topo_features_list[g] if topo_features_list else None
                 gnn_out, edge_out, control = self.gnn_executive.forward_with_control(
                     ccs[g], harmonic_energy=harmonic_energy,
+                    topo_features=topo_feat,
                 )
                 all_diagnostics[g]['control_signals'].append(control)
 
@@ -332,7 +344,7 @@ class ExecutiveReasoningLoop(nn.Module):
                 dsm_results = self.topo_bridge.forward_batched(
                     node_embs_list, semantic_weights,
                 )
-                for g, (_, sb) in enumerate(dsm_results):
+                for g, (_, sb, _, _) in enumerate(dsm_results):
                     semantic_biases[g] = sb
 
             # Phase 3: Per-graph TAT + integration (cheap)

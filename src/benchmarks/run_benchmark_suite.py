@@ -63,10 +63,17 @@ def _build_model(variant: str, mc: dict, max_classes: int, device: torch.device,
         convergence_threshold=mc["convergence_threshold"],
         use_topological_pe=mc.get("use_topological_pe", False),
         use_structural_features=mc.get("use_structural_features", False),
+        use_topo_feedback=mc.get("use_topo_feedback", False),
+        use_embedding_topo_feedback=mc.get("use_embedding_topo_feedback", False),
+        use_multi_head_classifier=mc.get("use_multi_head_classifier", False),
     )
 
     if variant == "symmetric":
-        model = SymmetricMultiHopModel(**common)
+        # SymmetricMultiHopModel doesn't support these params
+        sym_common = {k: v for k, v in common.items()
+                      if k not in ('use_topo_feedback', 'use_embedding_topo_feedback',
+                                   'use_multi_head_classifier')}
+        model = SymmetricMultiHopModel(**sym_common)
     elif variant == "hierarchical":
         model = HierarchicalMultiHopModel(
             **common,

@@ -98,10 +98,11 @@ class TopoBridgeEncoder(nn.Module):
 
 
 class TopoBridgeDecoder(nn.Module):
-    """Extracts node-aligned embeddings and semantic bias from LLM hidden states."""
+    """Extracts node-aligned embeddings, semantic bias, features, and graph embedding."""
 
     def __init__(self, topo_dim: int = 32, llm_dim: int = 2048):
         super().__init__()
+        self.topo_dim = topo_dim
         self.cross_attn = nn.MultiheadAttention(
             llm_dim, num_heads=8, batch_first=False,
         )
@@ -111,24 +112,26 @@ class TopoBridgeDecoder(nn.Module):
         )
         # Semantic bias: projects node embeddings for pairwise attention bias
         self.semantic_bias_proj = nn.Linear(topo_dim, topo_dim)
-        # Initialize with small weights so semantic_bias starts near zero.
-        # projected @ projected.T with default init gives O(dim) entries,
-        # overwhelming TAT attention logits which are O(1).
-        nn.init.normal_(self.semantic_bias_proj.weight, std=0.01)
+        # Initialize so semantic_bias starts moderate (not overwhelming TAT).
+        nn.init.normal_(self.semantic_bias_proj.weight, std=0.1)
         nn.init.zeros_(self.semantic_bias_proj.bias)
+        # Graph-level embedding: pool LLM hidden states → topo_dim
+        self.graph_pool = nn.Linear(llm_dim, topo_dim)
 
     def forward(
         self, topo_memory: torch.Tensor, llm_hidden: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Decode LLM hidden states back to node-aligned topo embeddings + bias.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Decode LLM hidden states back to node-aligned topo embeddings + bias + features + graph emb.
 
         Args:
             topo_memory: (N, llm_dim) from encoder — used as queries.
             llm_hidden: (seq_len, llm_dim) LLM hidden states — keys/values.
 
         Returns:
-            llm_out: (N, topo_dim) node-aligned output embeddings.
+            semantic_out: (N, topo_dim) node-aligned output embeddings.
             semantic_bias: (N, N) pairwise attention bias for TAT.
+            semantic_features: (N, topo_dim) per-node semantic features (for contrastive loss).
+            graph_embedding: (topo_dim,) graph-level embedding.
         """
         # Cross-attention: node queries attend over LLM hidden states
         # queries: (N, 1, llm_dim), kv: (seq, 1, llm_dim)
@@ -137,13 +140,19 @@ class TopoBridgeDecoder(nn.Module):
         attn_out, _ = self.cross_attn(queries, kv, kv)  # (N, 1, llm_dim)
         attn_out = attn_out.squeeze(1)  # (N, llm_dim)
 
-        llm_out = self.out_proj(attn_out)  # (N, topo_dim)
+        semantic_out = self.out_proj(attn_out)  # (N, topo_dim)
 
         # Compute semantic bias: pairwise similarity in projected space
-        projected = self.semantic_bias_proj(llm_out)  # (N, topo_dim)
+        projected = self.semantic_bias_proj(semantic_out)  # (N, topo_dim)
         semantic_bias = projected @ projected.T  # (N, N)
 
-        return llm_out, semantic_bias
+        # Semantic features = the projected node embeddings (for contrastive loss)
+        semantic_features = semantic_out  # (N, topo_dim)
+
+        # Graph-level embedding: mean-pool LLM hidden states → topo_dim
+        graph_embedding = self.graph_pool(llm_hidden.mean(dim=0))  # (topo_dim,)
+
+        return semantic_out, semantic_bias, semantic_features, graph_embedding
 
     def forward_batched(
         self,
@@ -151,8 +160,8 @@ class TopoBridgeDecoder(nn.Module):
         llm_hidden: torch.Tensor,
         memory_mask: torch.Tensor,
         sizes: list[int],
-    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        """Batched decode: extract per-graph node embeddings + semantic bias.
+    ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Batched decode: extract per-graph node embeddings + semantic bias + features + graph emb.
 
         Args:
             topo_memory: (max_N, B, llm_dim) padded projected nodes.
@@ -161,15 +170,11 @@ class TopoBridgeDecoder(nn.Module):
             sizes: list of N_i per graph.
 
         Returns:
-            List of (llm_out_i, semantic_bias_i) tuples, one per graph.
-            llm_out_i: (N_i, topo_dim), semantic_bias_i: (N_i, N_i).
+            List of (semantic_out_i, semantic_bias_i, semantic_features_i, graph_embedding_i).
         """
         B = topo_memory.shape[1]
 
         # Cross-attention: node queries attend over DSM hidden states
-        # queries: (max_N, B, llm_dim), kv: (K, B, llm_dim)
-        # Need query padding mask to avoid garbage output for padding positions
-        # But MHA doesn't have query_padding_mask — we just ignore padding outputs
         attn_out, _ = self.cross_attn(topo_memory, llm_hidden, llm_hidden)
         # (max_N, B, llm_dim)
 
@@ -177,16 +182,22 @@ class TopoBridgeDecoder(nn.Module):
         attn_out = attn_out.transpose(0, 1)  # (B, max_N, llm_dim)
 
         # Project to topo space: (B, max_N, topo_dim)
-        llm_out_batched = self.out_proj(attn_out)
+        semantic_out_batched = self.out_proj(attn_out)
 
-        # Unpad and compute per-graph semantic bias
+        # Per-graph graph-level embedding from LLM hidden states
+        # llm_hidden: (K, B, llm_dim) → mean over K → (B, llm_dim)
+        llm_pooled = llm_hidden.mean(dim=0)  # (B, llm_dim)
+
+        # Unpad and compute per-graph outputs
         results = []
         for i in range(B):
             n_i = sizes[i]
-            llm_out_i = llm_out_batched[i, :n_i]  # (N_i, topo_dim)
-            projected = self.semantic_bias_proj(llm_out_i)  # (N_i, topo_dim)
+            semantic_out_i = semantic_out_batched[i, :n_i]  # (N_i, topo_dim)
+            projected = self.semantic_bias_proj(semantic_out_i)  # (N_i, topo_dim)
             semantic_bias_i = projected @ projected.T  # (N_i, N_i)
-            results.append((llm_out_i, semantic_bias_i))
+            semantic_features_i = semantic_out_i  # (N_i, topo_dim)
+            graph_embedding_i = self.graph_pool(llm_pooled[i])  # (topo_dim,)
+            results.append((semantic_out_i, semantic_bias_i, semantic_features_i, graph_embedding_i))
 
         return results
 
@@ -213,7 +224,7 @@ class TopoBridge(nn.Module):
         node_embeddings: torch.Tensor,
         semantic_weight: torch.Tensor,
         task_text: str | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Full TopoBridge forward pass — always runs (no gate skip).
 
         Args:
@@ -222,8 +233,10 @@ class TopoBridge(nn.Module):
             task_text: Optional task description for the LLM/DSM.
 
         Returns:
-            llm_out: (N, topo_dim) node-aligned output.
+            semantic_out: (N, topo_dim) node-aligned output.
             semantic_bias: (N, N) pairwise bias for TAT attention.
+            semantic_features: (N, topo_dim) per-node features (for contrastive loss).
+            graph_embedding: (topo_dim,) graph-level embedding.
         """
         # Encode
         topo_memory, prefix_tokens = self.encoder(node_embeddings)
@@ -231,16 +244,14 @@ class TopoBridge(nn.Module):
         # LLM forward
         llm_hidden = self.backend.forward(prefix_tokens, topo_memory, task_text)
 
-        # Decode back to topo space + semantic bias
-        llm_out, semantic_bias = self.decoder(topo_memory, llm_hidden)
-
-        return llm_out, semantic_bias
+        # Decode back to topo space + semantic bias + features + graph embedding
+        return self.decoder(topo_memory, llm_hidden)
 
     def forward_batched(
         self,
         node_embeddings_list: list[torch.Tensor],
         semantic_weights: list[torch.Tensor],
-    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Batched TopoBridge: process multiple graphs through DSM in one pass.
 
         This is the key optimization for GPU utilization. Instead of running
@@ -252,7 +263,7 @@ class TopoBridge(nn.Module):
             semantic_weights: List of B scalar tensors (unused here, kept for API).
 
         Returns:
-            List of (llm_out_i, semantic_bias_i) tuples, one per graph.
+            List of (semantic_out_i, semantic_bias_i, semantic_features_i, graph_embedding_i).
         """
         # Batched encode
         topo_memory, prefix_tokens, memory_mask, sizes = \

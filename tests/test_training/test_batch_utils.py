@@ -154,7 +154,7 @@ class TestTopoBridgeBatchSupport:
 
         results = bridge.forward_batched(ne_list, sw_list)
         assert len(results) == 3
-        for i, (llm_out, semantic_bias) in enumerate(results):
+        for i, (llm_out, semantic_bias, _, _) in enumerate(results):
             n = ne_list[i].shape[0]
             assert llm_out.shape == (n, 8)
             assert semantic_bias.shape == (n, n)
@@ -176,12 +176,12 @@ class TestTopoBridgeBatchSupport:
         # Sequential
         seq_results = []
         for ne, sw in zip(ne_list, sw_list):
-            out, bias = bridge(ne, sw)
+            out, bias, _, _ = bridge(ne, sw)
             seq_results.append((out.shape, bias.shape))
 
         # Batched
         batch_results = bridge.forward_batched(ne_list, sw_list)
-        for i, (llm_out, bias) in enumerate(batch_results):
+        for i, (llm_out, bias, _, _) in enumerate(batch_results):
             assert llm_out.shape == seq_results[i][0]
             assert bias.shape == seq_results[i][1]
 

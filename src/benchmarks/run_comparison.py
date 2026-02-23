@@ -81,11 +81,15 @@ class HierarchicalMultiHopModel(nn.Module):
                  use_topological_pe=False,
                  use_structural_features=False,
                  wave_config=None,
-                 use_llm=False, llm_config=None):
+                 use_llm=False, llm_config=None,
+                 use_topo_feedback=False,
+                 use_embedding_topo_feedback=False,
+                 use_multi_head_classifier=False):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.use_llm = use_llm
         self.bypass_llm = False  # Set True to skip TopoBridge entirely (Phase A)
+        self.use_multi_head_classifier = use_multi_head_classifier
         wc = wave_config or {}
 
         # Detect DSM backend: DSM lives inside the executive loop (interleaved
@@ -120,6 +124,8 @@ class HierarchicalMultiHopModel(nn.Module):
             },
             use_dsm=use_dsm,
             dsm_config=dsm_config,
+            use_topo_feedback=use_topo_feedback,
+            use_embedding_topo_feedback=use_embedding_topo_feedback,
         )
 
         # Legacy TopoBridge for mock/llama backends (Phase 4c compat)
@@ -150,6 +156,7 @@ class HierarchicalMultiHopModel(nn.Module):
 
         # hodge(3) + wave_energy(1) + persistence(32)
         classifier_input_dim = 3 * embedding_dim + 3 + 1 + PERSISTENCE_FEATURES
+        self.classifier_input_dim = classifier_input_dim
         self.classifier = nn.Sequential(
             nn.Linear(classifier_input_dim, 4 * embedding_dim),
             nn.LayerNorm(4 * embedding_dim),
@@ -161,6 +168,16 @@ class HierarchicalMultiHopModel(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(2 * embedding_dim, max_classes),
         )
+
+        # Multi-head classifier: persistent per-task heads (no more _rebuild_classifier)
+        self.multi_head_classifier = None
+        if use_multi_head_classifier:
+            from src.training.multi_head_classifier import MultiHeadClassifier
+            from src.benchmarks.benchmark_dataset import TASK_REGISTRY, get_max_classes
+            task_classes = {t: get_max_classes(t) for t in TASK_REGISTRY}
+            self.multi_head_classifier = MultiHeadClassifier(
+                input_dim=classifier_input_dim, task_classes=task_classes,
+            )
 
     def _compute_hodge_features(self, cc, initial_edge_embs=None):
         if cc.num_cells(1) == 0 or cc.num_cells(0) == 0:
@@ -195,12 +212,15 @@ class HierarchicalMultiHopModel(nn.Module):
         except (RuntimeError, ValueError):
             return torch.zeros(PERSISTENCE_FEATURES)
 
-    def forward(self, cc, query_node, target_node, metadata=None):
+    def forward(self, cc, query_node, target_node, metadata=None,
+                topo_features=None, task=None):
         # Capture initial edge embeddings before the executive loop overwrites
         # them (GNN edge_out is gradient-dominated, destroys curl content).
         initial_edge_embs = cc.get_embeddings(1).clone() if cc.num_cells(1) > 0 else None
 
-        output, num_iters, diagnostics = self.executive_loop(cc)
+        output, num_iters, diagnostics = self.executive_loop(
+            cc, topo_features=topo_features,
+        )
 
         # LLM integration: blend executive output with TopoBridge output
         if self.use_llm and self.topo_bridge is not None and not self.bypass_llm:
@@ -214,10 +234,11 @@ class HierarchicalMultiHopModel(nn.Module):
             if metadata and 'task_prompt' in metadata:
                 task_text = metadata['task_prompt']
 
-            llm_out, _semantic_bias = self.topo_bridge(output, semantic_weight, task_text)
+            llm_out, _semantic_bias, _sem_feat, _graph_emb = self.topo_bridge(
+                output, semantic_weight, task_text,
+            )
 
             # Blend: output = (1 - semantic_weight) * executive_output + semantic_weight * llm_out
-            # _semantic_bias is unused in legacy path (used in DSM executive loop, Task 6)
             output = (1 - semantic_weight).unsqueeze(-1) * output + semantic_weight.unsqueeze(-1) * llm_out
 
         query_emb = output[query_node]
@@ -231,6 +252,10 @@ class HierarchicalMultiHopModel(nn.Module):
         persistence_features = self._compute_persistence_features(cc).to(dev)
         combined = torch.cat([query_emb, target_emb, diff_emb,
                               hodge_features, wave_energy, persistence_features])
+
+        # Use multi-head classifier if available and task is specified
+        if task is not None and self.multi_head_classifier is not None:
+            return self.multi_head_classifier(combined.unsqueeze(0), task).squeeze(0)
         return self.classifier(combined)
 
 
@@ -280,7 +305,7 @@ def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
 
 
 @torch.no_grad()
-def evaluate(model, dataset, label_smoothing=0.0, device=None):
+def evaluate(model, dataset, label_smoothing=0.0, device=None, task=None):
     if device is None:
         device = torch.device('cpu')
     model.eval()
@@ -290,7 +315,7 @@ def evaluate(model, dataset, label_smoothing=0.0, device=None):
     for i in range(len(dataset)):
         cc, query, target, answer, metadata = _unpack_sample(dataset[i])
         cc = cc.clone().to(device)
-        logits = model(cc, query, target, metadata=metadata)
+        logits = model(cc, query, target, metadata=metadata, task=task)
         loss = nn.functional.cross_entropy(logits.unsqueeze(0),
                                            torch.tensor([answer], device=device),
                                            label_smoothing=label_smoothing)

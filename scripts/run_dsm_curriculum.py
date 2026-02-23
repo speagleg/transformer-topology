@@ -31,6 +31,11 @@ from src.benchmarks.benchmark_dataset import BenchmarkDataset, get_max_classes
 from src.benchmarks.diagnostics import DiagnosticCollector
 from src.benchmarks.run_benchmark_suite import _build_model, _resolve_device
 from src.benchmarks.run_comparison import evaluate, _unpack_sample
+from src.training.batch_utils import train_epoch_batched, evaluate_batched
+from src.training.class_weights import compute_class_weights
+from src.training.contrastive_loss import SemanticContrastiveLoss
+from src.training.feature_replay import FeatureReplayBuffer
+from src.topology_observer import TopologyObserver
 
 # Phase task lists
 PHASE_A_TASKS = ["diverse", "bfs", "hodge_class", "spectral_gap", "path_counting"]
@@ -54,7 +59,10 @@ def _rebuild_classifier(model, task: str):
 
 
 def _build_dsm_optimizer(model, config):
-    """Build optimizer with 3 param groups: GNN/TAT, DSM, TopoBridge."""
+    """Build optimizer with 3 param groups: GNN/TAT, DSM/adapter, TopoBridge.
+
+    Handles both Track 1 (DSM) and Track 2 (Qwen adapter) backends.
+    """
     tc = config['training']
     gnn_tat_params = []
     dsm_params = []
@@ -65,14 +73,22 @@ def _build_dsm_optimizer(model, config):
             continue
         if 'dsm' in name.lower() or 'distilled' in name.lower():
             dsm_params.append(param)
+        elif ('adapter' in name.lower() or 'graph_former' in name.lower()
+              or 'graphformer' in name.lower()):
+            # Track 2: Qwen adapter params get adapter-specific LR
+            dsm_params.append(param)
         elif 'topo_bridge' in name or 'bridge' in name:
             bridge_params.append(param)
         else:
             gnn_tat_params.append(param)
 
+    # Use adapter_learning_rate for Track 2, dsm_learning_rate for Track 1
+    semantic_lr = tc.get('adapter_learning_rate',
+                         tc.get('dsm_learning_rate', 5e-4))
+
     param_groups = [
         {'params': gnn_tat_params, 'lr': tc['learning_rate']},
-        {'params': dsm_params, 'lr': tc.get('dsm_learning_rate', 5e-4)},
+        {'params': dsm_params, 'lr': semantic_lr},
         {'params': bridge_params, 'lr': tc.get('bridge_learning_rate', 1e-4)},
     ]
     return torch.optim.AdamW(param_groups, weight_decay=tc.get('weight_decay', 0.01))
@@ -97,7 +113,8 @@ def _create_replay_dataset(phase_a_datasets, replay_fraction=0.2, target_size=No
 
 
 def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
-                label_smoothing=0.0, device=None, use_amp=False):
+                label_smoothing=0.0, device=None, use_amp=False,
+                topo_features=None, task=None):
     """Standard training loop -- no gate penalty."""
     if device is None:
         device = torch.device('cpu')
@@ -114,7 +131,8 @@ def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
         cc = cc.clone().to(device)
 
         with torch.amp.autocast('cuda', enabled=amp_enabled, dtype=torch.bfloat16):
-            logits = model(cc, query, target, metadata=metadata)
+            logits = model(cc, query, target, metadata=metadata,
+                           topo_features=topo_features, task=task)
             loss = torch.nn.functional.cross_entropy(
                 logits.unsqueeze(0),
                 torch.tensor([answer], device=device),
@@ -139,13 +157,12 @@ def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
 def train_epoch_with_replay(model, dataset, replay_samples, optimizer,
                             max_norm=5.0, accumulation_steps=4,
                             label_smoothing=0.0, device=None, use_amp=False,
-                            main_task=None):
+                            main_task=None, topo_features=None):
     """Training loop that interleaves replay samples from earlier phases.
 
-    replay_samples is a list of (sample, task_type) tuples. For each replay
-    sample, the classifier is temporarily rebuilt for that task.
-    main_task: the primary task name, used to restore the classifier after
-    replay samples from different tasks.
+    replay_samples is a list of (sample, task_type) tuples. With multi-head
+    classifier, uses task= parameter. Falls back to _rebuild_classifier
+    for legacy single-head classifier.
     """
     if device is None:
         device = torch.device('cpu')
@@ -153,6 +170,7 @@ def train_epoch_with_replay(model, dataset, replay_samples, optimizer,
     if hasattr(dataset, 'shuffle'):
         dataset.shuffle()
 
+    use_multi_head = getattr(model, 'use_multi_head_classifier', False)
     amp_enabled = use_amp and device.type == 'cuda'
     total_loss = 0.0
     optimizer.zero_grad()
@@ -175,21 +193,26 @@ def train_epoch_with_replay(model, dataset, replay_samples, optimizer,
         if source == 'main':
             sample = dataset[idx]
             cc, query, target, answer, metadata = _unpack_sample(sample)
-            # Restore main task classifier if replay changed it
-            if on_replay_task and main_task is not None:
+            current_task = main_task
+            # Legacy path: restore classifier if replay changed it
+            if not use_multi_head and on_replay_task and main_task is not None:
                 _rebuild_classifier(model, main_task)
                 on_replay_task = False
         else:
             sample, replay_task = replay_samples[idx]
             cc, query, target, answer, metadata = _unpack_sample(sample)
-            # Rebuild classifier for replay task if needed
-            _rebuild_classifier(model, replay_task)
-            on_replay_task = True
+            current_task = replay_task
+            # Legacy path: rebuild classifier for replay task
+            if not use_multi_head:
+                _rebuild_classifier(model, replay_task)
+                on_replay_task = True
 
         cc = cc.clone().to(device)
 
         with torch.amp.autocast('cuda', enabled=amp_enabled, dtype=torch.bfloat16):
-            logits = model(cc, query, target, metadata=metadata)
+            logits = model(cc, query, target, metadata=metadata,
+                           topo_features=topo_features,
+                           task=current_task if use_multi_head else None)
             loss = torch.nn.functional.cross_entropy(
                 logits.unsqueeze(0),
                 torch.tensor([answer], device=device),
@@ -245,7 +268,7 @@ def _load_or_generate(
 
 def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                train_range, all_topos, checkpoint_dir, use_amp,
-               phase_a_datasets=None):
+               phase_a_datasets=None, observer=None):
     """Run a single curriculum phase (A, B, or C).
 
     Args:
@@ -260,6 +283,7 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
         checkpoint_dir: Path for checkpoints
         use_amp: whether to use bf16 autocast
         phase_a_datasets: dict of {task: BenchmarkDataset} from Phase A (for replay)
+        observer: optional TopologyObserver for periodic analysis
 
     Returns:
         dict of {task: best_val_acc}, dict of {task: BenchmarkDataset} for datasets
@@ -276,6 +300,8 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
     label_smoothing = tc.get('label_smoothing', 0.1)
     accumulation_steps = tc.get('accumulation_steps', 4)
     max_norm = tc.get('max_norm', 5.0)
+    use_batched = tc.get('use_batched', False)
+    batch_size = tc.get('batch_size', 8)
 
     results = {}
     datasets = {}
@@ -286,12 +312,15 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
         replay_samples = _create_replay_dataset(phase_a_datasets, replay_fraction=0.2)
         print(f"  Task replay: {len(replay_samples)} samples from Phase A")
 
+    use_multi_head = getattr(model, 'use_multi_head_classifier', False)
+
     for task in tasks:
         task_classes = get_max_classes(task)
         print(f"\n  Task: {task} ({task_classes} classes)")
 
-        # Rebuild classifier for this task
-        _rebuild_classifier(model, task)
+        # Legacy: rebuild single-head classifier for this task
+        if not use_multi_head:
+            _rebuild_classifier(model, task)
 
         # Load/generate datasets
         train_ds = _load_or_generate(
@@ -318,12 +347,64 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
         patience_counter = 0
         best_state = None
 
+        topo_config = config.get('topology_observer', {})
+        active_mode = topo_config.get('active_mode', False)
+
+        # Gradual unfreeze config (Track 1)
+        lc = config.get('llm', {})
+        gradual_unfreeze = lc.get('gradual_unfreeze', False)
+        freeze_epochs = lc.get('freeze_epochs', 5)
+        unfreeze_top_n_epochs = lc.get('unfreeze_top_n_epochs', 15)
+        unfreeze_top_n = lc.get('unfreeze_top_n', 4)
+        dsm_backend = None
+        if gradual_unfreeze and hasattr(model, 'executive_loop'):
+            tb = getattr(model.executive_loop, 'topo_bridge', None)
+            if tb is not None:
+                dsm_backend = getattr(tb, 'backend', None)
+
         for epoch in range(num_epochs):
             t0 = time.time()
 
-            if replay_samples:
-                # Rebuild classifier for main task before training
-                _rebuild_classifier(model, task)
+            # Gradual unfreeze: freeze → partial → full
+            if dsm_backend is not None and gradual_unfreeze:
+                if epoch == 0:
+                    dsm_backend.freeze_all()
+                    print(f"    [UNFREEZE] DSM frozen (epoch 0-{freeze_epochs-1})")
+                elif epoch == freeze_epochs:
+                    dsm_backend.unfreeze_top_n(unfreeze_top_n)
+                    optimizer = _build_dsm_optimizer(model, config)
+                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                        optimizer, T_max=num_epochs - epoch,
+                    )
+                    print(f"    [UNFREEZE] Top {unfreeze_top_n} layers unfrozen")
+                elif epoch == unfreeze_top_n_epochs:
+                    dsm_backend.unfreeze_all()
+                    optimizer = _build_dsm_optimizer(model, config)
+                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                        optimizer, T_max=num_epochs - epoch,
+                    )
+                    print(f"    [UNFREEZE] All DSM layers unfrozen")
+
+            # Active mode: get cached topo_features from observer
+            topo_feat = None
+            if active_mode and observer is not None:
+                topo_feat = observer.get_topo_features()
+
+            task_arg = task if use_multi_head else None
+
+            if use_batched and not replay_samples:
+                # Batched training (4-8x GPU utilization improvement)
+                loss = train_epoch_batched(
+                    model, train_ds, optimizer,
+                    batch_size=batch_size, max_norm=max_norm,
+                    label_smoothing=label_smoothing,
+                    device=device, use_amp=use_amp,
+                    task=task_arg, topo_features=topo_feat,
+                )
+            elif replay_samples:
+                # Replay with interleaving (sequential — replay mixes tasks)
+                if not use_multi_head:
+                    _rebuild_classifier(model, task)
                 loss = train_epoch_with_replay(
                     model, train_ds, replay_samples, optimizer,
                     max_norm=max_norm,
@@ -332,6 +413,7 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     device=device,
                     use_amp=use_amp,
                     main_task=task,
+                    topo_features=topo_feat,
                 )
             else:
                 loss = train_epoch(
@@ -341,11 +423,23 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     label_smoothing=label_smoothing,
                     device=device,
                     use_amp=use_amp,
+                    topo_features=topo_feat,
+                    task=task_arg,
                 )
 
-            # Ensure classifier matches val task before evaluation
-            _rebuild_classifier(model, task)
-            val_acc, val_loss = evaluate(model, val_ds, device=device)
+            # Evaluation
+            if not use_multi_head:
+                _rebuild_classifier(model, task)
+            if use_batched:
+                val_acc, val_loss = evaluate_batched(
+                    model, val_ds, batch_size=batch_size,
+                    device=device, task=task_arg,
+                )
+            else:
+                val_acc, val_loss = evaluate(
+                    model, val_ds, device=device,
+                    task=task_arg,
+                )
             elapsed = time.time() - t0
 
             marker = ""
@@ -365,6 +459,17 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
             print(f"    Ep {epoch:3d} | loss {loss:.4f} | "
                   f"val {val_acc:.3f} | lr {lr_str} | {elapsed:.0f}s{marker}")
             scheduler.step()
+
+            # Topology observer: periodic analysis
+            if observer is not None and observer.should_analyze(epoch):
+                sample = train_ds[0]
+                topo_results = observer.run_analysis(epoch, sample)
+                cg = topo_results.get('comp_graph', {})
+                if 'error' not in cg:
+                    print(f"    [TOPO] gap={cg.get('spectral_gap', 0):.4f} "
+                          f"grad={cg.get('gradient_energy_ratio', 0):.3f} "
+                          f"curl={cg.get('curl_energy_ratio', 0):.3f} "
+                          f"harm={cg.get('harmonic_energy_ratio', 0):.3f}")
 
             # Rolling checkpoint
             rolling_ckpt = checkpoint_dir / f"phase_{phase_name}_{task}_latest.pt"
@@ -441,6 +546,17 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
     initial_max_classes = get_max_classes(PHASE_A_TASKS[0])
     model = _build_model("hierarchical_llm", mc, initial_max_classes, device,
                           wave_config=wc, llm_config=lc)
+    # Load pre-trained DSM weights if available (Track 1)
+    pretrained_path = lc.get('pretrained_path')
+    if pretrained_path and Path(pretrained_path).exists():
+        dsm_backend = None
+        if hasattr(model, 'executive_loop') and model.executive_loop.topo_bridge is not None:
+            dsm_backend = model.executive_loop.topo_bridge.backend
+        if dsm_backend is not None and hasattr(dsm_backend, 'load_pretrained'):
+            state = torch.load(pretrained_path, map_location=device, weights_only=True)
+            dsm_backend.load_pretrained(state)
+            print(f"  Loaded pre-trained DSM from {pretrained_path}")
+
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total params: {total_params:,}, Trainable: {trainable_params:,}")
@@ -449,6 +565,20 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
     # per-op exclusions or GradScaler.  fp32 is ~2x slower but actually learns.
     use_amp = False
     all_results = {}
+
+    # Topology observer: periodic analysis of DSM health + computation graph
+    topo_config = config.get('topology_observer', {})
+    observer = None
+    if topo_config.get('enabled', False):
+        criterion = torch.nn.CrossEntropyLoss()
+        dsm = None
+        if (model.executive_loop.topo_bridge is not None
+                and hasattr(model.executive_loop.topo_bridge, 'backend')
+                and hasattr(model.executive_loop.topo_bridge.backend, 'dsm')):
+            dsm = model.executive_loop.topo_bridge.backend.dsm
+        observer = TopologyObserver(model, criterion, dsm=dsm, config=topo_config)
+        print(f"  Topology observer enabled (every {topo_config.get('analyze_every', 5)} epochs)"
+              f"{', active mode' if topo_config.get('active_mode', False) else ''}")
 
     # ---- Resume from checkpoint if requested ----
     skip_a = resume_phase in ("b", "B", "c", "C")
@@ -504,6 +634,7 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
         phase_a_results, phase_a_datasets = _run_phase(
             'a', PHASE_A_TASKS, model, config, device, pregen_dir,
             train_range, all_topos, checkpoint_dir, use_amp,
+            observer=observer,
         )
 
         # Re-enable DSM + unfreeze for subsequent phases
@@ -528,6 +659,7 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
             'b', PHASE_B_TASKS, model, config, device, pregen_dir,
             train_range, all_topos, checkpoint_dir, use_amp,
             phase_a_datasets=phase_a_datasets if phase_a_datasets else None,
+            observer=observer,
         )
         for task, acc in phase_b_results.items():
             all_results[f"phase_b_{task}"] = {"best_val_acc": acc}
@@ -544,6 +676,7 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
         'c', PHASE_C_TASKS, model, config, device, pregen_dir,
         train_range, all_topos, checkpoint_dir, use_amp,
         phase_a_datasets=phase_a_datasets if phase_a_datasets else None,
+        observer=observer,
     )
     for task, acc in phase_c_results.items():
         all_results[f"phase_c_{task}"] = {"best_val_acc": acc}
@@ -555,9 +688,11 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
 
     emb_dim = mc["embedding_dim"]
     train_n = bc["train_n_nodes"]
+    use_multi_head = getattr(model, 'use_multi_head_classifier', False)
     diag_tasks = ["diverse", "graph_completion", "labeled_reasoning"]
     for task in diag_tasks:
-        _rebuild_classifier(model, task)
+        if not use_multi_head:
+            _rebuild_classifier(model, task)
         ds = _load_or_generate(
             pregen_dir, task, "val", 50, train_n, emb_dim,
             topologies=all_topos, n_nodes_range=train_range,
