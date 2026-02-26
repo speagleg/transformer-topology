@@ -11,7 +11,7 @@ build/
 htmlcov/
 wandb/
 
-# Data and model artifacts
-data/
+# Data and model artifacts (root only — not src/data/)
+/data/
 models/
 *.pt

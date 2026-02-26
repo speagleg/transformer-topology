@@ -30,6 +30,13 @@ from src.benchmarks.llm_tasks import (
     generate_labeled_reasoning_task,
     generate_analogical_transfer_task,
 )
+from src.benchmarks.conceptnet_tasks import (
+    generate_kg_relation_task,
+    generate_kg_concept_task,
+    generate_kg_pathvalid_task,
+    generate_kg_analogy_task,
+    generate_kg_cluster_task,
+)
 
 
 def _wrap_diverse(n_nodes, embedding_dim, topologies, **kwargs):
@@ -200,6 +207,41 @@ def _wrap_analogical_transfer(n_nodes, embedding_dim, topologies, **kwargs):
     return generate_analogical_transfer_task(n_nodes, embedding_dim, topologies=topologies)
 
 
+def _wrap_kg_relation(n_nodes, embedding_dim, topologies, **kwargs):
+    G = kwargs.get('conceptnet_graph')
+    if G is None:
+        raise ValueError("kg_relation requires conceptnet_graph kwarg")
+    return generate_kg_relation_task(G, embedding_dim, min_nodes=n_nodes, max_nodes=n_nodes + 30)
+
+
+def _wrap_kg_concept(n_nodes, embedding_dim, topologies, **kwargs):
+    G = kwargs.get('conceptnet_graph')
+    if G is None:
+        raise ValueError("kg_concept requires conceptnet_graph kwarg")
+    return generate_kg_concept_task(G, embedding_dim, min_nodes=n_nodes, max_nodes=n_nodes + 30)
+
+
+def _wrap_kg_pathvalid(n_nodes, embedding_dim, topologies, **kwargs):
+    G = kwargs.get('conceptnet_graph')
+    if G is None:
+        raise ValueError("kg_pathvalid requires conceptnet_graph kwarg")
+    return generate_kg_pathvalid_task(G, embedding_dim, min_nodes=n_nodes, max_nodes=n_nodes + 30)
+
+
+def _wrap_kg_analogy(n_nodes, embedding_dim, topologies, **kwargs):
+    G = kwargs.get('conceptnet_graph')
+    if G is None:
+        raise ValueError("kg_analogy requires conceptnet_graph kwarg")
+    return generate_kg_analogy_task(G, embedding_dim, min_nodes=10, max_nodes=30)
+
+
+def _wrap_kg_cluster(n_nodes, embedding_dim, topologies, **kwargs):
+    G = kwargs.get('conceptnet_graph')
+    if G is None:
+        raise ValueError("kg_cluster requires conceptnet_graph kwarg")
+    return generate_kg_cluster_task(G, embedding_dim, min_nodes=n_nodes, max_nodes=n_nodes + 30)
+
+
 # Task registry: task_type -> (generator_wrapper, max_classes, default_kwargs)
 TASK_REGISTRY: dict[str, tuple[callable, int, dict]] = {
     "diverse":            (_wrap_diverse, 11, {"min_hops": 2, "max_hops": 10}),
@@ -216,6 +258,12 @@ TASK_REGISTRY: dict[str, tuple[callable, int, dict]] = {
     "graph_completion":     (_wrap_graph_completion, 2, {}),
     "labeled_reasoning":    (_wrap_labeled_reasoning, 3, {}),
     "analogical_transfer":  (_wrap_analogical_transfer, 3, {}),
+    # Phase D: Knowledge graph tasks (require conceptnet_graph kwarg)
+    "kg_relation":          (_wrap_kg_relation, 10, {}),
+    "kg_concept":           (_wrap_kg_concept, 9, {}),
+    "kg_pathvalid":         (_wrap_kg_pathvalid, 2, {}),
+    "kg_analogy":           (_wrap_kg_analogy, 3, {}),
+    "kg_cluster":           (_wrap_kg_cluster, 6, {}),
 }
 
 

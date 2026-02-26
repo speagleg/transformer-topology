@@ -19,6 +19,7 @@ class TestTaskRegistry:
             "cycle_detection", "path_counting", "betti_number",
             "bfs", "dijkstra", "spectral_gap", "hodge_class",
             "graph_completion", "labeled_reasoning", "analogical_transfer",
+            "kg_relation", "kg_concept", "kg_pathvalid", "kg_analogy", "kg_cluster",
         }
         assert set(TASK_REGISTRY.keys()) == expected
 

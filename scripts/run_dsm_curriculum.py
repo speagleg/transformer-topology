@@ -41,6 +41,7 @@ from src.topology_observer import TopologyObserver
 PHASE_A_TASKS = ["diverse", "bfs", "hodge_class", "spectral_gap", "path_counting"]
 PHASE_B_TASKS = ["graph_completion", "labeled_reasoning"]
 PHASE_C_TASKS = ["analogical_transfer", "graph_completion", "labeled_reasoning"]
+PHASE_D_TASKS = ["kg_relation", "kg_concept", "kg_pathvalid", "kg_analogy", "kg_cluster"]
 
 
 def _rebuild_classifier(model, task: str):
@@ -279,6 +280,7 @@ def _load_or_generate(
     embedding_dim: int,
     topologies: list[str] | None = None,
     n_nodes_range: tuple[int, int] | None = None,
+    **extra_kwargs,
 ) -> BenchmarkDataset:
     """Load pregenerated dataset if available, else generate on-the-fly."""
     if pregenerated_dir is not None:
@@ -297,6 +299,7 @@ def _load_or_generate(
     return BenchmarkDataset(
         num_samples, task_type, n_nodes, embedding_dim,
         topologies=topologies, n_nodes_range=n_nodes_range,
+        **extra_kwargs,
     )
 
 
@@ -334,8 +337,8 @@ def _feature_replay_step(model, feature_replay, replay_ratio, optimizer,
 
 def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                train_range, all_topos, checkpoint_dir, use_amp,
-               phase_a_datasets=None, observer=None):
-    """Run a single curriculum phase (A, B, or C).
+               phase_a_datasets=None, observer=None, conceptnet_graph=None):
+    """Run a single curriculum phase (A, B, C, or D).
 
     Args:
         phase_name: 'a', 'b', or 'c'
@@ -362,6 +365,8 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
 
     epochs_key = f'epochs_phase_{phase_name}'
     num_epochs = tc.get(epochs_key, 30)
+    # Phase D per-task epoch override from config
+    phase_d_epoch_map = config.get('phase_d', {}).get('epochs', {})
     patience = tc.get('patience', 10)
     label_smoothing = tc.get('label_smoothing', 0.1)
     accumulation_steps = tc.get('accumulation_steps', 4)
@@ -398,15 +403,28 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
             _rebuild_classifier(model, task)
 
         # Load/generate datasets
+        extra_gen_kwargs = {}
+        if conceptnet_graph is not None and task.startswith("kg_"):
+            extra_gen_kwargs['conceptnet_graph'] = conceptnet_graph
+            # Phase D may specify custom sample counts
+            phase_d_cfg = config.get('phase_d', {})
+            train_samples = phase_d_cfg.get('kg_train_samples', bc.get('train_samples', 5000))
+            val_samples = phase_d_cfg.get('kg_val_samples', bc.get('val_samples', 500))
+        else:
+            train_samples = bc.get('train_samples', 5000)
+            val_samples = bc.get('val_samples', 500)
+
         train_ds = _load_or_generate(
             pregen_dir, task, "train",
-            bc.get('train_samples', 5000), train_n, emb_dim,
+            train_samples, train_n, emb_dim,
             topologies=all_topos, n_nodes_range=train_range,
+            **extra_gen_kwargs,
         )
         val_ds = _load_or_generate(
             pregen_dir, task, "val",
-            bc.get('val_samples', 500), train_n, emb_dim,
+            val_samples, train_n, emb_dim,
             topologies=all_topos, n_nodes_range=train_range,
+            **extra_gen_kwargs,
         )
         datasets[task] = train_ds
 
@@ -425,12 +443,15 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
         replay_ratio = tc.get('replay_ratio', 0.0)
         feature_replay = FeatureReplayBuffer() if replay_ratio > 0 else None
 
+        # Per-task epoch count (Phase D tasks may have individual counts)
+        task_epochs = phase_d_epoch_map.get(task, num_epochs)
+
         # Build per-component optimizer
         optimizer = _build_dsm_optimizer(model, config)
 
         # Cosine annealing scheduler
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=num_epochs,
+            optimizer, T_max=task_epochs,
         )
 
         best_val_acc = 0.0
@@ -452,7 +473,7 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
             if tb is not None:
                 dsm_backend = getattr(tb, 'backend', None)
 
-        for epoch in range(num_epochs):
+        for epoch in range(task_epochs):
             t0 = time.time()
 
             # Gradual unfreeze: freeze → partial → full
@@ -464,14 +485,14 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     dsm_backend.unfreeze_top_n(unfreeze_top_n)
                     optimizer = _build_dsm_optimizer(model, config)
                     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                        optimizer, T_max=num_epochs - epoch,
+                        optimizer, T_max=task_epochs - epoch,
                     )
                     print(f"    [UNFREEZE] Top {unfreeze_top_n} layers unfrozen")
                 elif epoch == unfreeze_top_n_epochs:
                     dsm_backend.unfreeze_all()
                     optimizer = _build_dsm_optimizer(model, config)
                     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                        optimizer, T_max=num_epochs - epoch,
+                        optimizer, T_max=task_epochs - epoch,
                     )
                     print(f"    [UNFREEZE] All DSM layers unfrozen")
 
@@ -696,8 +717,9 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
               f"{', active mode' if topo_config.get('active_mode', False) else ''}")
 
     # ---- Resume from checkpoint if requested ----
-    skip_a = resume_phase in ("b", "B", "c", "C")
-    skip_b = resume_phase in ("c", "C")
+    skip_a = resume_phase in ("b", "B", "c", "C", "d", "D")
+    skip_b = resume_phase in ("c", "C", "d", "D")
+    skip_c = resume_phase in ("d", "D")
 
     if skip_a:
         last_task = PHASE_A_TASKS[-1]
@@ -716,6 +738,26 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
     if skip_b:
         last_task = PHASE_B_TASKS[-1]
         ckpt_path = checkpoint_dir / f"phase_b_{last_task}.pt"
+        if ckpt_path.exists():
+            state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+            model.load_state_dict(state, strict=False)
+            del state
+            gc.collect()
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+            print(f"  Resumed from checkpoint: {ckpt_path}")
+        else:
+            print(f"  WARNING: {ckpt_path} not found, starting from scratch")
+
+    if skip_c:
+        # Try phase_d resume_from config first, then last Phase C checkpoint
+        phase_d_cfg = config.get('phase_d', {})
+        resume_from = phase_d_cfg.get('resume_from', None)
+        if resume_from and Path(resume_from).exists():
+            ckpt_path = Path(resume_from)
+        else:
+            last_task = PHASE_C_TASKS[-1]
+            ckpt_path = checkpoint_dir / f"phase_c_{last_task}.pt"
         if ckpt_path.exists():
             state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
             model.load_state_dict(state, strict=False)
@@ -783,18 +825,54 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
             torch.cuda.empty_cache()
 
     # ---- Phase C: Full Symbiosis ----
-    print(f"\n{'=' * 72}")
-    print("Phase C: Full Symbiosis (all tasks + 20% replay)")
-    print(f"{'=' * 72}")
+    if not skip_c:
+        print(f"\n{'=' * 72}")
+        print("Phase C: Full Symbiosis (all tasks + 20% replay)")
+        print(f"{'=' * 72}")
 
-    phase_c_results, _ = _run_phase(
-        'c', PHASE_C_TASKS, model, config, device, pregen_dir,
-        train_range, all_topos, checkpoint_dir, use_amp,
-        phase_a_datasets=phase_a_datasets if phase_a_datasets else None,
-        observer=observer,
-    )
-    for task, acc in phase_c_results.items():
-        all_results[f"phase_c_{task}"] = {"best_val_acc": acc}
+        phase_c_results, _ = _run_phase(
+            'c', PHASE_C_TASKS, model, config, device, pregen_dir,
+            train_range, all_topos, checkpoint_dir, use_amp,
+            phase_a_datasets=phase_a_datasets if phase_a_datasets else None,
+            observer=observer,
+        )
+        for task, acc in phase_c_results.items():
+            all_results[f"phase_c_{task}"] = {"best_val_acc": acc}
+
+    # ---- Phase D: Meta-Cognition (KG tasks) ----
+    phase_d_config = config.get("phase_d", {})
+    phase_d_tasks = phase_d_config.get("tasks", [])
+    if phase_d_tasks:
+        print(f"\n{'=' * 72}")
+        print("Phase D: Meta-Cognition (ConceptNet KG tasks)")
+        print(f"{'=' * 72}")
+
+        # Load ConceptNet graph
+        cn_path = bc.get("conceptnet_path", "data/conceptnet/conceptnet_en.pkl")
+        conceptnet_graph = None
+        if Path(cn_path).exists():
+            from src.data.conceptnet import load_cached_graph
+            conceptnet_graph = load_cached_graph(cn_path)
+            print(f"  Loaded ConceptNet: {conceptnet_graph.number_of_nodes():,} nodes, "
+                  f"{conceptnet_graph.number_of_edges():,} edges")
+        else:
+            print(f"  WARNING: ConceptNet not found at {cn_path}")
+            print(f"  Run: python scripts/precompute_conceptnet.py")
+
+        if conceptnet_graph is not None:
+            # Ensure DSM/LLM is enabled for Phase D
+            if hasattr(model, 'executive_loop'):
+                model.executive_loop.use_dsm = True
+
+            phase_d_results, _ = _run_phase(
+                'd', phase_d_tasks, model, config, device, pregen_dir,
+                train_range, all_topos, checkpoint_dir, use_amp,
+                phase_a_datasets=phase_a_datasets if phase_a_datasets else None,
+                observer=observer,
+                conceptnet_graph=conceptnet_graph,
+            )
+            for task, acc in phase_d_results.items():
+                all_results[f"phase_d_{task}"] = {"best_val_acc": acc}
 
     # ---- Diagnostics ----
     print(f"\n{'=' * 72}")
@@ -839,8 +917,8 @@ if __name__ == "__main__":
     parser.add_argument("config", nargs="?", default="config/dsm_training.yaml")
     parser.add_argument("--pregenerated-dir", default=None,
                         help="Load pre-generated datasets from this directory")
-    parser.add_argument("--resume-phase", default=None, choices=["b", "B", "c", "C"],
-                        help="Skip earlier phases and resume from B or C (loads last checkpoint)")
+    parser.add_argument("--resume-phase", default=None, choices=["b", "B", "c", "C", "d", "D"],
+                        help="Skip earlier phases and resume from B, C, or D (loads last checkpoint)")
     args = parser.parse_args()
     run_curriculum(args.config, pregenerated_dir=args.pregenerated_dir,
                    resume_phase=args.resume_phase)
