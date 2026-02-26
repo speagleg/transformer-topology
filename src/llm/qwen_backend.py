@@ -91,13 +91,15 @@ class QwenGraphBackend(nn.Module):
                 combined = graph_tokens
 
             with torch.no_grad():
+                # Cast to Qwen's dtype (fp16) for forward pass
+                combined_half = combined.to(self.llm.dtype)
                 out = self.llm(
-                    inputs_embeds=combined.unsqueeze(0),
+                    inputs_embeds=combined_half.unsqueeze(0),
                     output_hidden_states=True,
                 )
                 hidden = out.hidden_states[self.extract_layer].squeeze(0)
-                # Extract only graph token positions
-                hidden = hidden[:graph_tokens.shape[0]]
+                # Extract only graph token positions, cast back to model dtype (fp32)
+                hidden = hidden[:graph_tokens.shape[0]].to(graph_tokens.dtype)
 
         node_proj = self.encoder.input_proj(node_embeddings)
         features, bias, graph_emb = self.decoder(node_proj, hidden)
