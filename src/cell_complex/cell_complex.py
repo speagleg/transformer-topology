@@ -21,6 +21,7 @@ class CellComplex:
         self._2_cell_boundaries: list[list[int]] = []
         self._2_cell_signs: list[list[float]] = []  # orientation signs for B2
         self._2_cell_types: list[str] = []
+        self.node_texts: list[str] = []
 
     @property
     def device(self) -> torch.device:
@@ -51,6 +52,7 @@ class CellComplex:
         cc._2_cell_boundaries = self._2_cell_boundaries
         cc._2_cell_signs = self._2_cell_signs
         cc._2_cell_types = self._2_cell_types
+        cc.node_texts = list(self.node_texts)
         return cc
 
     def num_cells(self, dim: int) -> int:
