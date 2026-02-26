@@ -44,6 +44,23 @@ PHASE_C_TASKS = ["analogical_transfer", "graph_completion", "labeled_reasoning"]
 PHASE_D_TASKS = ["kg_relation", "kg_concept", "kg_pathvalid", "kg_analogy", "kg_cluster"]
 
 
+def _load_state_filtered(model, state_dict):
+    """Load state dict, skipping keys with shape mismatches (e.g. num_tasks changed)."""
+    model_state = model.state_dict()
+    filtered = {}
+    skipped = []
+    for k, v in state_dict.items():
+        if k in model_state and model_state[k].shape != v.shape:
+            skipped.append(f"{k}: ckpt={list(v.shape)} vs model={list(model_state[k].shape)}")
+            continue
+        filtered[k] = v
+    if skipped:
+        print(f"  Skipped {len(skipped)} size-mismatched keys:")
+        for s in skipped:
+            print(f"    {s}")
+    model.load_state_dict(filtered, strict=False)
+
+
 def _rebuild_classifier(model, task: str):
     """Rebuild classifier head for the current task's num_classes.
 
@@ -394,7 +411,7 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
         if task_ckpt.exists():
             print(f"    Checkpoint exists: {task_ckpt} — loading and skipping")
             state = torch.load(task_ckpt, map_location=device, weights_only=True)
-            model.load_state_dict(state, strict=False)
+            _load_state_filtered(model, state)
             results[task] = -1.0  # unknown val from previous run
             continue
 
@@ -726,7 +743,7 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
         ckpt_path = checkpoint_dir / f"phase_a_{last_task}.pt"
         if ckpt_path.exists():
             state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
-            model.load_state_dict(state, strict=False)
+            _load_state_filtered(model, state)
             del state
             gc.collect()
             if device.type == 'cuda':
@@ -740,7 +757,7 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
         ckpt_path = checkpoint_dir / f"phase_b_{last_task}.pt"
         if ckpt_path.exists():
             state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
-            model.load_state_dict(state, strict=False)
+            _load_state_filtered(model, state)
             del state
             gc.collect()
             if device.type == 'cuda':
@@ -760,7 +777,7 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
             ckpt_path = checkpoint_dir / f"phase_c_{last_task}.pt"
         if ckpt_path.exists():
             state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
-            model.load_state_dict(state, strict=False)
+            _load_state_filtered(model, state)
             del state
             gc.collect()
             if device.type == 'cuda':

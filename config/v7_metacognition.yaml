@@ -30,7 +30,7 @@ wave:
 
 llm:
   backend: qwen
-  qwen_model: Qwen/Qwen2.5-3B-Instruct-AWQ
+  qwen_model: Qwen/Qwen2.5-3B-Instruct
   llm_dim: 2048
   num_tokens: 16
   adapter_layers: 2
@@ -75,7 +75,7 @@ benchmark:
   test_n_nodes: [20, 40, 80]
   train_topologies: [ba, ws, grid, tree, ladder, sbm]
   test_topologies: [er, caveman]
-  checkpoint_dir: data/v7_metacognition/checkpoints
+  checkpoint_dir: data/v6_track2/checkpoints
   pregen_dir: data/dsm_datasets
   conceptnet_path: data/conceptnet/conceptnet_en.pkl
 
