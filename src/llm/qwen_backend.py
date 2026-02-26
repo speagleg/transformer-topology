@@ -56,12 +56,13 @@ class QwenGraphBackend(nn.Module):
         for p in self.llm.parameters():
             p.requires_grad = False
 
-    def forward_graph(self, node_embeddings, task_id):
+    def forward_graph(self, node_embeddings, task_id, node_texts=None):
         """Full graph->LLM->graph pipeline.
 
         Args:
             node_embeddings: (N, topo_dim) from GNN
             task_id: scalar tensor (task index)
+            node_texts: optional list of concept strings for each node
 
         Returns:
             (semantic_features, semantic_bias, graph_embedding)
@@ -73,12 +74,30 @@ class QwenGraphBackend(nn.Module):
         else:
             if self.llm is None:
                 self._load_qwen()
+
+            # Build input: graph tokens + optional text tokens
+            if node_texts is not None:
+                text_prompt = "Graph nodes: " + ", ".join(
+                    f"{i}={t}" for i, t in enumerate(node_texts)
+                ) + "."
+                if not hasattr(self, '_tokenizer'):
+                    from transformers import AutoTokenizer
+                    self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+                text_ids = self._tokenizer(text_prompt, return_tensors="pt").input_ids
+                text_ids = text_ids.to(node_embeddings.device)
+                text_emb = self.llm.model.embed_tokens(text_ids).squeeze(0)
+                combined = torch.cat([graph_tokens, text_emb], dim=0)
+            else:
+                combined = graph_tokens
+
             with torch.no_grad():
                 out = self.llm(
-                    inputs_embeds=graph_tokens.unsqueeze(0),
+                    inputs_embeds=combined.unsqueeze(0),
                     output_hidden_states=True,
                 )
                 hidden = out.hidden_states[self.extract_layer].squeeze(0)
+                # Extract only graph token positions
+                hidden = hidden[:graph_tokens.shape[0]]
 
         node_proj = self.encoder.input_proj(node_embeddings)
         features, bias, graph_emb = self.decoder(node_proj, hidden)

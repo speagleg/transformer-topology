@@ -234,7 +234,10 @@ class ExecutiveReasoningLoop(nn.Module):
             sem_feat = None
             if self.use_dsm and self.topo_bridge is not None:
                 semantic_weight = control.semantic_weight
-                _, semantic_bias, sem_feat, _ = self.topo_bridge(gnn_out, semantic_weight)
+                node_texts = getattr(cc, 'node_texts', None) or None
+                _, semantic_bias, sem_feat, _ = self.topo_bridge(
+                    gnn_out, semantic_weight, node_texts=node_texts,
+                )
 
             # Update cell complex for TAT (detach for graph safety)
             cc.set_embeddings(0, gnn_out.detach())

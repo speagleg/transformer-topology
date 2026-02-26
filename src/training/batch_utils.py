@@ -107,7 +107,10 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
                 task_text = None
                 if metadatas[g] and 'task_prompt' in metadatas[g]:
                     task_text = metadatas[g]['task_prompt']
-                llm_out, _, sem_feat, _ = model.topo_bridge(output, semantic_weight, task_text)
+                node_texts = getattr(ccs[g], 'node_texts', None) or None
+                llm_out, _, sem_feat, _ = model.topo_bridge(
+                    output, semantic_weight, task_text, node_texts=node_texts,
+                )
                 model._last_semantic_features = sem_feat
                 model._last_adjacency = ccs[g].adjacency_matrix(0)
                 output = ((1 - semantic_weight).unsqueeze(-1) * output

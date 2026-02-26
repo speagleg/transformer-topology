@@ -252,8 +252,9 @@ class HierarchicalMultiHopModel(nn.Module):
             if metadata and 'task_prompt' in metadata:
                 task_text = metadata['task_prompt']
 
+            node_texts = getattr(cc, 'node_texts', None) or None
             llm_out, _semantic_bias, sem_feat, _graph_emb = self.topo_bridge(
-                output, semantic_weight, task_text,
+                output, semantic_weight, task_text, node_texts=node_texts,
             )
             self._last_semantic_features = sem_feat
             self._last_adjacency = cc.adjacency_matrix(0)

@@ -224,6 +224,7 @@ class TopoBridge(nn.Module):
         node_embeddings: torch.Tensor,
         semantic_weight: torch.Tensor,
         task_text: str | None = None,
+        node_texts: list[str] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Full TopoBridge forward pass — always runs (no gate skip).
 
@@ -231,6 +232,7 @@ class TopoBridge(nn.Module):
             node_embeddings: (N, topo_dim) from TAT/GNN output.
             semantic_weight: scalar [0,1] from ControlHead (unused here but kept for interface).
             task_text: Optional task description for the LLM/DSM.
+            node_texts: Optional list of concept strings per node for KG tasks.
 
         Returns:
             semantic_out: (N, topo_dim) node-aligned output.
@@ -241,7 +243,7 @@ class TopoBridge(nn.Module):
         # Encode
         topo_memory, prefix_tokens = self.encoder(node_embeddings)
 
-        # LLM forward
+        # LLM forward (DSM backend ignores node_texts; Qwen backend uses them)
         llm_hidden = self.backend.forward(prefix_tokens, topo_memory, task_text)
 
         # Decode back to topo space + semantic bias + features + graph embedding
