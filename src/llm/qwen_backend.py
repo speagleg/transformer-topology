@@ -22,6 +22,7 @@ class QwenGraphBackend(nn.Module):
         use_mock = config.get("use_mock", False)
         self.llm_dim = llm_dim
         self.extract_layer = config.get("extract_layer", 16)
+        self.model_name = config.get("qwen_model", "Qwen/Qwen2.5-3B-Instruct-AWQ")
 
         self.encoder = GraphFormerEncoder(
             topo_dim=topo_dim, llm_dim=llm_dim, num_tokens=num_tokens,
@@ -46,11 +47,10 @@ class QwenGraphBackend(nn.Module):
             self.llm = None
 
     def _load_qwen(self):
-        """Load Qwen2.5-3B-AWQ (4-bit quantized)."""
+        """Load Qwen model (4-bit quantized if AWQ variant)."""
         from transformers import AutoModelForCausalLM
-        model_name = "Qwen/Qwen2.5-3B-AWQ"
         self.llm = AutoModelForCausalLM.from_pretrained(
-            model_name, device_map="cuda", torch_dtype=torch.float16,
+            self.model_name, device_map="cuda", torch_dtype=torch.float16,
         )
         self.llm.eval()
         for p in self.llm.parameters():

@@ -30,12 +30,13 @@ wave:
 
 llm:
   backend: qwen
-  qwen_model: Qwen/Qwen2.5-3B-AWQ
+  qwen_model: Qwen/Qwen2.5-3B-Instruct-AWQ
   llm_dim: 2048
   num_tokens: 16
   adapter_layers: 2
   extract_layer: 16
   num_tasks: 14
+  use_mock: true  # AWQ kernels need compilation; mock for Phase A, swap for Phase B
 
 training:
   device: auto

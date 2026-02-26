@@ -51,6 +51,13 @@ training:
   max_norm: 5.0
   accumulation_steps: 4
 
+topology_observer:
+  enabled: true
+  analyze_every: 5
+  active_mode: false
+  dsm_num_heads: 16
+  dsm_hidden_dim: 1024
+
 benchmark:
   train_samples: 5000
   val_samples: 500

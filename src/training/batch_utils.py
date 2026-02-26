@@ -32,6 +32,10 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
     Processes a list of (cc, query, target, answer, metadata) tuples.
     Returns list of (logits, answer) pairs.
 
+    Also sets model._last_semantic_features, model._last_adjacency, and
+    model._last_combined from the LAST graph in the batch (for contrastive
+    loss and feature replay).
+
     Args:
         task: Optional task name for multi-head classifier.
         topo_features: Optional topology features tensor for ControlHead.
@@ -86,6 +90,11 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
 
         # Per-graph classifier
         for g, (output, num_iters, diagnostics) in enumerate(loop_results):
+            # Capture semantic features from DSM diagnostics
+            if 'semantic_features' in diagnostics:
+                model._last_semantic_features = diagnostics['semantic_features']
+                model._last_adjacency = ccs[g].adjacency_matrix(0)
+
             # LLM integration at model level (legacy TopoBridge path)
             # DSM path is handled inside executive_loop already
             if (model.use_llm and model.topo_bridge is not None
@@ -98,7 +107,9 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
                 task_text = None
                 if metadatas[g] and 'task_prompt' in metadatas[g]:
                     task_text = metadatas[g]['task_prompt']
-                llm_out, _, _, _ = model.topo_bridge(output, semantic_weight, task_text)
+                llm_out, _, sem_feat, _ = model.topo_bridge(output, semantic_weight, task_text)
+                model._last_semantic_features = sem_feat
+                model._last_adjacency = ccs[g].adjacency_matrix(0)
                 output = ((1 - semantic_weight).unsqueeze(-1) * output
                           + semantic_weight.unsqueeze(-1) * llm_out)
 
@@ -115,6 +126,8 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
 
             combined = torch.cat([query_emb, target_emb, diff_emb,
                                   hodge_features, wave_energy, persistence_features])
+            model._last_combined = combined.detach()
+
             if task is not None and getattr(model, 'multi_head_classifier', None) is not None:
                 logits = model.multi_head_classifier(combined.unsqueeze(0), task).squeeze(0)
             else:
@@ -135,6 +148,8 @@ def train_epoch_batched(
     model, dataset, optimizer, batch_size=8, max_norm=5.0,
     label_smoothing=0.0, device=None, use_amp=False,
     task=None, topo_features=None,
+    class_weights=None,
+    contrastive_fn=None, contrastive_weight=0.0,
 ):
     """Training epoch with graph-level mini-batching.
 
@@ -153,6 +168,9 @@ def train_epoch_batched(
         use_amp: Whether to use bf16 autocast.
         task: Optional task name for multi-head classifier.
         topo_features: Optional topology features tensor for ControlHead.
+        class_weights: Optional per-class weights for cross-entropy.
+        contrastive_fn: Optional SemanticContrastiveLoss instance.
+        contrastive_weight: Weight for contrastive loss term.
 
     Returns:
         Average training loss for the epoch.
@@ -189,6 +207,7 @@ def train_epoch_batched(
                     logits.unsqueeze(0),
                     torch.tensor([answer], device=device),
                     label_smoothing=label_smoothing,
+                    weight=class_weights,
                 )
                 if not (torch.isnan(loss) or torch.isinf(loss)):
                     batch_loss = batch_loss + loss
@@ -196,6 +215,14 @@ def train_epoch_batched(
 
             if valid_count > 0:
                 batch_loss = batch_loss / valid_count
+
+            # Contrastive loss (uses last graph's semantic features)
+            if (contrastive_fn is not None and valid_count > 0
+                    and hasattr(model, '_last_semantic_features')):
+                sf = model._last_semantic_features
+                adj = model._last_adjacency.to(sf.device)
+                c_loss = contrastive_fn(sf, adj) * contrastive_weight
+                batch_loss = batch_loss + c_loss
 
         if valid_count > 0 and not (torch.isnan(batch_loss) or torch.isinf(batch_loss)):
             batch_loss.backward()

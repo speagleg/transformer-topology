@@ -114,7 +114,10 @@ def _create_replay_dataset(phase_a_datasets, replay_fraction=0.2, target_size=No
 
 def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
                 label_smoothing=0.0, device=None, use_amp=False,
-                topo_features=None, task=None):
+                topo_features=None, task=None,
+                class_weights=None,
+                contrastive_fn=None, contrastive_weight=0.0,
+                feature_replay=None, current_task=None):
     """Standard training loop -- no gate penalty."""
     if device is None:
         device = torch.device('cpu')
@@ -137,13 +140,25 @@ def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
                 logits.unsqueeze(0),
                 torch.tensor([answer], device=device),
                 label_smoothing=label_smoothing,
+                weight=class_weights,
             ) / accumulation_steps
 
         if torch.isnan(loss) or torch.isinf(loss):
             continue
 
+        # Contrastive loss on semantic features
+        if contrastive_fn is not None and hasattr(model, '_last_semantic_features'):
+            sf = model._last_semantic_features
+            adj = model._last_adjacency.to(sf.device)
+            c_loss = contrastive_fn(sf, adj) * contrastive_weight / accumulation_steps
+            loss = loss + c_loss
+
         loss.backward()
         total_loss += loss.item() * accumulation_steps
+
+        # Feature replay: store combined features
+        if feature_replay is not None and hasattr(model, '_last_combined'):
+            feature_replay.save(current_task or task or '', model._last_combined, answer)
 
         if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataset):
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
@@ -157,7 +172,10 @@ def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
 def train_epoch_with_replay(model, dataset, replay_samples, optimizer,
                             max_norm=5.0, accumulation_steps=4,
                             label_smoothing=0.0, device=None, use_amp=False,
-                            main_task=None, topo_features=None):
+                            main_task=None, topo_features=None,
+                            class_weights=None,
+                            contrastive_fn=None, contrastive_weight=0.0,
+                            feature_replay=None):
     """Training loop that interleaves replay samples from earlier phases.
 
     replay_samples is a list of (sample, task_type) tuples. With multi-head
@@ -213,18 +231,34 @@ def train_epoch_with_replay(model, dataset, replay_samples, optimizer,
             logits = model(cc, query, target, metadata=metadata,
                            topo_features=topo_features,
                            task=current_task if use_multi_head else None)
+            # Only apply class_weights for main task samples — replay samples
+            # have different class counts and would cause shape mismatch
+            wt = class_weights if source == 'main' else None
             loss = torch.nn.functional.cross_entropy(
                 logits.unsqueeze(0),
                 torch.tensor([answer], device=device),
                 label_smoothing=label_smoothing,
+                weight=wt,
             ) / accumulation_steps
 
         if torch.isnan(loss) or torch.isinf(loss):
             step_count += 1
             continue
 
+        # Contrastive loss on semantic features
+        if contrastive_fn is not None and hasattr(model, '_last_semantic_features'):
+            sf = model._last_semantic_features
+            adj = model._last_adjacency.to(sf.device)
+            c_loss = contrastive_fn(sf, adj) * contrastive_weight / accumulation_steps
+            loss = loss + c_loss
+
         loss.backward()
         total_loss += loss.item() * accumulation_steps
+
+        # Feature replay: store combined features
+        if feature_replay is not None and hasattr(model, '_last_combined'):
+            feature_replay.save(current_task or '', model._last_combined, answer)
+
         step_count += 1
 
         if step_count % accumulation_steps == 0 or step_count == len(schedule):
@@ -264,6 +298,38 @@ def _load_or_generate(
         num_samples, task_type, n_nodes, embedding_dim,
         topologies=topologies, n_nodes_range=n_nodes_range,
     )
+
+
+def _feature_replay_step(model, feature_replay, replay_ratio, optimizer,
+                         device, label_smoothing, max_norm, use_multi_head, task):
+    """Classifier-only replay from feature buffer.
+
+    Replays stored penultimate-layer features through the classifier head(s)
+    for tasks OTHER than the current task. Cheap alternative to full forward
+    passes for catastrophic forgetting prevention.
+    """
+    import torch.nn.functional as F
+    model.train()
+    for replay_task in feature_replay.tasks():
+        if replay_task == task:
+            continue  # skip current task
+        items = feature_replay.sample_ratio(replay_task, replay_ratio)
+        if not items:
+            continue
+        for feat, label in items:
+            feat = feat.to(device)
+            if use_multi_head and model.multi_head_classifier is not None:
+                logits = model.multi_head_classifier(feat.unsqueeze(0), replay_task).squeeze(0)
+            else:
+                logits = model.classifier(feat)
+            r_loss = F.cross_entropy(logits.unsqueeze(0),
+                                     torch.tensor([label], device=device),
+                                     label_smoothing=label_smoothing)
+            r_loss.backward()
+        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        if torch.isfinite(gn):
+            optimizer.step()
+        optimizer.zero_grad()
 
 
 def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
@@ -318,6 +384,15 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
         task_classes = get_max_classes(task)
         print(f"\n  Task: {task} ({task_classes} classes)")
 
+        # Per-task resume: skip if checkpoint already exists
+        task_ckpt = checkpoint_dir / f"phase_{phase_name}_{task}.pt"
+        if task_ckpt.exists():
+            print(f"    Checkpoint exists: {task_ckpt} — loading and skipping")
+            state = torch.load(task_ckpt, map_location=device, weights_only=True)
+            model.load_state_dict(state, strict=False)
+            results[task] = -1.0  # unknown val from previous run
+            continue
+
         # Legacy: rebuild single-head classifier for this task
         if not use_multi_head:
             _rebuild_classifier(model, task)
@@ -334,6 +409,21 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
             topologies=all_topos, n_nodes_range=train_range,
         )
         datasets[task] = train_ds
+
+        # Class weights for imbalanced tasks
+        class_wt = None
+        if tc.get('use_class_weights', False):
+            labels = torch.tensor([s[3] if len(s) == 5 else s[-1]
+                                   for s in train_ds.samples])
+            class_wt = compute_class_weights(labels, task_classes).to(device)
+
+        # Contrastive loss on semantic features
+        contrastive_weight = tc.get('contrastive_loss_weight', 0.0)
+        contrastive_fn = SemanticContrastiveLoss() if contrastive_weight > 0 else None
+
+        # Feature replay buffer
+        replay_ratio = tc.get('replay_ratio', 0.0)
+        feature_replay = FeatureReplayBuffer() if replay_ratio > 0 else None
 
         # Build per-component optimizer
         optimizer = _build_dsm_optimizer(model, config)
@@ -400,6 +490,9 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     label_smoothing=label_smoothing,
                     device=device, use_amp=use_amp,
                     task=task_arg, topo_features=topo_feat,
+                    class_weights=class_wt,
+                    contrastive_fn=contrastive_fn,
+                    contrastive_weight=contrastive_weight,
                 )
             elif replay_samples:
                 # Replay with interleaving (sequential — replay mixes tasks)
@@ -414,6 +507,10 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     use_amp=use_amp,
                     main_task=task,
                     topo_features=topo_feat,
+                    class_weights=class_wt,
+                    contrastive_fn=contrastive_fn,
+                    contrastive_weight=contrastive_weight,
+                    feature_replay=feature_replay,
                 )
             else:
                 loss = train_epoch(
@@ -425,7 +522,18 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     use_amp=use_amp,
                     topo_features=topo_feat,
                     task=task_arg,
+                    class_weights=class_wt,
+                    contrastive_fn=contrastive_fn,
+                    contrastive_weight=contrastive_weight,
+                    feature_replay=feature_replay,
+                    current_task=task,
                 )
+
+            # Feature replay: classifier-only rehearsal on previous tasks
+            if feature_replay is not None and feature_replay.tasks():
+                _feature_replay_step(model, feature_replay, replay_ratio,
+                                     optimizer, device, label_smoothing,
+                                     max_norm, use_multi_head, task)
 
             # Evaluation
             if not use_multi_head:
@@ -465,11 +573,18 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                 sample = train_ds[0]
                 topo_results = observer.run_analysis(epoch, sample)
                 cg = topo_results.get('comp_graph', {})
+                emb = topo_results.get('embedding', {})
                 if 'error' not in cg:
                     print(f"    [TOPO] gap={cg.get('spectral_gap', 0):.4f} "
                           f"grad={cg.get('gradient_energy_ratio', 0):.3f} "
                           f"curl={cg.get('curl_energy_ratio', 0):.3f} "
-                          f"harm={cg.get('harmonic_energy_ratio', 0):.3f}")
+                          f"harm={cg.get('harmonic_energy_ratio', 0):.3f} "
+                          f"ops={cg.get('num_operations', 0)} "
+                          f"flows={cg.get('num_data_flows', 0)}")
+                else:
+                    print(f"    [TOPO ERR comp_graph] {cg.get('error', 'unknown')}")
+                if 'error' in emb:
+                    print(f"    [TOPO ERR embedding] {emb.get('error', 'unknown')}")
 
             # Rolling checkpoint
             rolling_ckpt = checkpoint_dir / f"phase_{phase_name}_{task}_latest.pt"

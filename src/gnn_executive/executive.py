@@ -20,7 +20,9 @@ class GNNExecutive(nn.Module):
                  num_spectral_layers: int, max_freqs: int,
                  use_higher_order: bool = False,
                  produce_control_signals: bool = False,
-                 num_filters: int = 0):
+                 num_filters: int = 0,
+                 use_topo_feedback: bool = False,
+                 use_embedding_topo_feedback: bool = False):
         super().__init__()
         self.use_higher_order = use_higher_order
         self.produce_control_signals = produce_control_signals
@@ -50,6 +52,8 @@ class GNNExecutive(nn.Module):
             self.control_head = ControlHead(
                 embedding_dim=embedding_dim, num_freqs=max_freqs,
                 num_filters=num_filters,
+                use_topo_feedback=use_topo_feedback,
+                use_embedding_topo_feedback=use_embedding_topo_feedback,
             )
 
     def forward(self, cc: CellComplex) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -83,6 +87,7 @@ class GNNExecutive(nn.Module):
 
     def forward_with_control(
         self, cc: CellComplex, harmonic_energy: torch.Tensor | None = None,
+        topo_features: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, ControlSignal]:
         """Run dual-path GNN and produce control signals for the TAT.
 
@@ -105,5 +110,6 @@ class GNNExecutive(nn.Module):
                 "forward_with_control() requires produce_control_signals=True"
             )
         fused, edge_out = self.forward(cc)
-        control = self.control_head(fused, harmonic_energy=harmonic_energy)
+        control = self.control_head(fused, harmonic_energy=harmonic_energy,
+                                    topo_features=topo_features)
         return fused, edge_out, control

@@ -128,12 +128,15 @@ class HierarchicalMultiHopModel(nn.Module):
             use_embedding_topo_feedback=use_embedding_topo_feedback,
         )
 
-        # Legacy TopoBridge for mock/llama backends (Phase 4c compat)
+        # Legacy TopoBridge for mock/llama/qwen backends (Phase 4c compat)
         if use_llm and backend_type != 'dsm':
-            llm_dim = lc.get('llm_dim', 2048)
-            num_prefix = lc.get('num_prefix', 8)
-            gate_threshold = lc.get('gate_threshold', 0.1)
-            if backend_type == 'llama':
+            if backend_type == 'qwen':
+                from src.llm.qwen_bridge_adapter import QwenBridgeAdapter
+                self.topo_bridge = QwenBridgeAdapter(lc, embedding_dim)
+            elif backend_type == 'llama':
+                llm_dim = lc.get('llm_dim', 2048)
+                num_prefix = lc.get('num_prefix', 8)
+                gate_threshold = lc.get('gate_threshold', 0.1)
                 from src.llm.llama_backend import LlamaBackend
                 backend = LlamaBackend(
                     model_name=lc.get('model_name', 'meta-llama/Llama-3.2-1B'),
@@ -142,15 +145,25 @@ class HierarchicalMultiHopModel(nn.Module):
                     lora_alpha=lc.get('lora_alpha', 32),
                     hidden_dim=llm_dim,
                 )
+                self.topo_bridge = TopoBridge(
+                    backend=backend,
+                    topo_dim=embedding_dim,
+                    llm_dim=llm_dim,
+                    num_prefix=num_prefix,
+                    gate_threshold=gate_threshold,
+                )
             else:
+                llm_dim = lc.get('llm_dim', 2048)
+                num_prefix = lc.get('num_prefix', 8)
+                gate_threshold = lc.get('gate_threshold', 0.1)
                 backend = MockLLMBackend(llm_dim=llm_dim, hidden_dim=lc.get('mock_hidden', 256))
-            self.topo_bridge = TopoBridge(
-                backend=backend,
-                topo_dim=embedding_dim,
-                llm_dim=llm_dim,
-                num_prefix=num_prefix,
-                gate_threshold=gate_threshold,
-            )
+                self.topo_bridge = TopoBridge(
+                    backend=backend,
+                    topo_dim=embedding_dim,
+                    llm_dim=llm_dim,
+                    num_prefix=num_prefix,
+                    gate_threshold=gate_threshold,
+                )
         else:
             self.topo_bridge = None
 
@@ -222,6 +235,11 @@ class HierarchicalMultiHopModel(nn.Module):
             cc, topo_features=topo_features,
         )
 
+        # Capture semantic features from DSM path (stored in diagnostics by executive_loop)
+        if 'semantic_features' in diagnostics:
+            self._last_semantic_features = diagnostics['semantic_features']
+            self._last_adjacency = cc.adjacency_matrix(0)
+
         # LLM integration: blend executive output with TopoBridge output
         if self.use_llm and self.topo_bridge is not None and not self.bypass_llm:
             control_signals = diagnostics.get('control_signals', [])
@@ -234,9 +252,11 @@ class HierarchicalMultiHopModel(nn.Module):
             if metadata and 'task_prompt' in metadata:
                 task_text = metadata['task_prompt']
 
-            llm_out, _semantic_bias, _sem_feat, _graph_emb = self.topo_bridge(
+            llm_out, _semantic_bias, sem_feat, _graph_emb = self.topo_bridge(
                 output, semantic_weight, task_text,
             )
+            self._last_semantic_features = sem_feat
+            self._last_adjacency = cc.adjacency_matrix(0)
 
             # Blend: output = (1 - semantic_weight) * executive_output + semantic_weight * llm_out
             output = (1 - semantic_weight).unsqueeze(-1) * output + semantic_weight.unsqueeze(-1) * llm_out
@@ -252,6 +272,7 @@ class HierarchicalMultiHopModel(nn.Module):
         persistence_features = self._compute_persistence_features(cc).to(dev)
         combined = torch.cat([query_emb, target_emb, diff_emb,
                               hodge_features, wave_energy, persistence_features])
+        self._last_combined = combined.detach()
 
         # Use multi-head classifier if available and task is specified
         if task is not None and self.multi_head_classifier is not None:

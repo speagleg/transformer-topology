@@ -6,6 +6,7 @@ from src.topology_analyzer.attention_analyzer import AttentionFlowAnalyzer
 from src.topology_analyzer.weight_analyzer import WeightSpaceAnalyzer
 from src.topology_analyzer.sheaf_analyzer import CrossLayerSheafAnalyzer
 from src.topology_analyzer.feedback import TopologyFeedback, EmbeddingTopologyAdvisor
+from src.topology_analyzer.dsm_wrapper import DSMAnalysisWrapper
 
 __all__ = [
     'TopologicalProfile',
@@ -18,4 +19,5 @@ __all__ = [
     'CrossLayerSheafAnalyzer',
     'TopologyFeedback',
     'EmbeddingTopologyAdvisor',
+    'DSMAnalysisWrapper',
 ]

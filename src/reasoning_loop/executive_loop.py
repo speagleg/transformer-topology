@@ -231,9 +231,10 @@ class ExecutiveReasoningLoop(nn.Module):
             # 2.5. DSM: encode → DSM forward → decode → semantic_bias
             semantic_bias = None
             semantic_weight = None
+            sem_feat = None
             if self.use_dsm and self.topo_bridge is not None:
                 semantic_weight = control.semantic_weight
-                _, semantic_bias, _, _ = self.topo_bridge(gnn_out, semantic_weight)
+                _, semantic_bias, sem_feat, _ = self.topo_bridge(gnn_out, semantic_weight)
 
             # Update cell complex for TAT (detach for graph safety)
             cc.set_embeddings(0, gnn_out.detach())
@@ -273,6 +274,10 @@ class ExecutiveReasoningLoop(nn.Module):
 
             prev_embeddings = current_embeddings
             prev_harmonic_energy = current_harmonic_energy
+
+        # Expose last iteration's semantic features for contrastive loss
+        if sem_feat is not None:
+            diagnostics['semantic_features'] = sem_feat
 
         return current_embeddings, num_iters, diagnostics
 
@@ -338,14 +343,16 @@ class ExecutiveReasoningLoop(nn.Module):
 
             # Phase 2: Batched DSM call (expensive, NOW BATCHED)
             semantic_biases = [None] * B
+            sem_feats = [None] * B
             if self.use_dsm and self.topo_bridge is not None:
                 node_embs_list = [go[0] for go in gnn_outputs]
                 semantic_weights = [go[2].semantic_weight for go in gnn_outputs]
                 dsm_results = self.topo_bridge.forward_batched(
                     node_embs_list, semantic_weights,
                 )
-                for g, (_, sb, _, _) in enumerate(dsm_results):
+                for g, (_, sb, sf, _) in enumerate(dsm_results):
                     semantic_biases[g] = sb
+                    sem_feats[g] = sf
 
             # Phase 3: Per-graph TAT + integration (cheap)
             for g in range(B):
@@ -372,8 +379,10 @@ class ExecutiveReasoningLoop(nn.Module):
 
             prev_embeddings = [ce.clone() for ce in current_embeddings]
 
-        # Build return values
+        # Build return values — attach last iteration's semantic features
         results = []
         for g in range(B):
+            if sem_feats[g] is not None:
+                all_diagnostics[g]['semantic_features'] = sem_feats[g]
             results.append((current_embeddings[g], self.max_iterations, all_diagnostics[g]))
         return results
