@@ -40,7 +40,8 @@ def analyze_computation_graph_cc(model, cc, query, target, answer, criterion,
 
     Clones the CellComplex to avoid mutation side-effects.
     """
-    wrapper = CellComplexModelWrapper(model, cc.clone(), query, target, metadata)
-    dummy = torch.zeros(1)
-    target_tensor = torch.tensor([answer])
+    device = next(model.parameters()).device
+    wrapper = CellComplexModelWrapper(model, cc.clone().to(device), query, target, metadata)
+    dummy = torch.zeros(1, device=device)
+    target_tensor = torch.tensor([answer], device=device)
     return analyze_computation_graph(wrapper, dummy, target_tensor, criterion)
