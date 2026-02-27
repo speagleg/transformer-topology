@@ -313,11 +313,20 @@ def _load_or_generate(
         else:
             print(f"    {path.name} not found, generating on-the-fly...")
 
-    return BenchmarkDataset(
+    ds = BenchmarkDataset(
         num_samples, task_type, n_nodes, embedding_dim,
         topologies=topologies, n_nodes_range=n_nodes_range,
         **extra_kwargs,
     )
+    # Auto-save generated data for reuse on crash/restart
+    if pregenerated_dir is not None:
+        range_str = (f"n{n_nodes_range[0]}-{n_nodes_range[1]}"
+                     if n_nodes_range else f"n{n_nodes}")
+        save_path = pregenerated_dir / f"{task_type}_{split}_{range_str}.pt"
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        ds.save(str(save_path))
+        print(f"    Saved {save_path.name} ({len(ds)} samples)")
+    return ds
 
 
 def _feature_replay_step(model, feature_replay, replay_ratio, optimizer,
