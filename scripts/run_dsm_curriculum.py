@@ -792,6 +792,19 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
             if device.type == 'cuda':
                 torch.cuda.empty_cache()
             print(f"  Resumed from checkpoint: {ckpt_path}")
+
+            # Warm-start semantic_weight for Phase D text integration
+            sw_init = phase_d_cfg.get('semantic_weight_init', None)
+            if sw_init is not None and hasattr(model, 'executive_loop'):
+                el = model.executive_loop
+                if hasattr(el, 'gnn_executive') and hasattr(el.gnn_executive, 'control_head'):
+                    head = el.gnn_executive.control_head
+                    if hasattr(head, 'semantic_weight_head'):
+                        old_val = head.semantic_weight_head.bias.data.item()
+                        head.semantic_weight_head.bias.data.fill_(sw_init)
+                        new_sigmoid = torch.sigmoid(torch.tensor(sw_init)).item()
+                        print(f"  Semantic weight bias: {old_val:.2f} -> {sw_init} "
+                              f"(sigmoid={new_sigmoid:.3f})")
         else:
             print(f"  WARNING: {ckpt_path} not found, starting from scratch")
 
