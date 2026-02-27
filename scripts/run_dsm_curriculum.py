@@ -502,9 +502,11 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
             results[task] = -1.0  # unknown val from previous run
             continue
 
-        # Legacy: rebuild single-head classifier for this task
+        # Ensure classifier head exists for this task BEFORE building optimizer
         if not use_multi_head:
             _rebuild_classifier(model, task)
+        elif hasattr(model, 'multi_head_classifier') and model.multi_head_classifier is not None:
+            model.multi_head_classifier.add_task(task, get_max_classes(task))
 
         # Load/generate datasets
         extra_gen_kwargs = {}
@@ -1023,8 +1025,21 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
         for task, acc in phase_c_results.items():
             all_results[f"phase_c_{task}"] = {"best_val_acc": acc}
 
-    # ---- Phase D: Meta-Cognition (KG tasks) ----
+    # ---- Warm-start semantic_weight for Phase D ----
     phase_d_config = config.get("phase_d", {})
+    sw_init = phase_d_config.get('semantic_weight_init', None)
+    if sw_init is not None and hasattr(model, 'executive_loop'):
+        el = model.executive_loop
+        if hasattr(el, 'gnn_executive') and hasattr(el.gnn_executive, 'control_head'):
+            head = el.gnn_executive.control_head
+            if hasattr(head, 'semantic_weight_head'):
+                old_val = head.semantic_weight_head.bias.data.item()
+                head.semantic_weight_head.bias.data.fill_(sw_init)
+                new_sigmoid = torch.sigmoid(torch.tensor(sw_init)).item()
+                print(f"  Semantic weight bias: {old_val:.2f} -> {sw_init} "
+                      f"(sigmoid={new_sigmoid:.3f})")
+
+    # ---- Phase D: Meta-Cognition (KG tasks) ----
     phase_d_tasks = phase_d_config.get("tasks", [])
     if phase_d_tasks:
         print(f"\n{'=' * 72}")
