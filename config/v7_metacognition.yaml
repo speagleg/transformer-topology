@@ -42,9 +42,15 @@ training:
   device: auto
   learning_rate: 0.0003        # was 0.001 — gentle fine-tune for pre-trained GNN/TAT
   adapter_learning_rate: 0.001  # was 0.0001 — 10x boost, adapter must learn text features
-  bridge_learning_rate: 0.0005  # was 0.0001 — 5x boost for bridge decoder
+  bridge_learning_rate: 0.0001   # was 0.0005 — lowered, bridge was drifting 12x more than GNN/TAT
+  bridge_max_norm: 1.0           # separate grad clipping for bridge (vs 5.0 for main)
+  bridge_accumulation_steps: 8   # bridge steps less frequently (vs 4 for main)
   weight_decay: 0.01
-  label_smoothing: 0.1
+  label_smoothing: 0.02         # was 0.1 — reduced to let focal loss handle calibration
+  loss_fn: focal                 # 'ce' or 'focal' — focal down-weights easy examples
+  focal_gamma: 2.0               # focusing parameter (0 = CE, 2 = typical focal)
+  scheduler: cosine_warm_restarts  # maintains LR floor (vs cosine which decays to 0)
+  scheduler_eta_min: 0.00001     # minimum LR floor for main optimizer
   batch_size: 8
   use_batched: true
   epochs_phase_a: 30
@@ -56,7 +62,7 @@ training:
   accumulation_steps: 4
   replay_ratio: 0.5
   use_class_weights: true
-  contrastive_loss_weight: 0.1
+  contrastive_loss_weight: 0.0   # was 0.1 — disabled, focal loss handles hard example focus
 
 topology_observer:
   enabled: true

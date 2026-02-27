@@ -19,6 +19,7 @@ import random
 import torch
 import torch.nn as nn
 from src.benchmarks.run_comparison import _unpack_sample
+from src.training.focal_loss import focal_loss
 
 
 def graph_collate_fn(samples):
@@ -153,6 +154,9 @@ def train_epoch_batched(
     task=None, topo_features=None,
     class_weights=None,
     contrastive_fn=None, contrastive_weight=0.0,
+    loss_fn='ce', focal_gamma=2.0,
+    bridge_optimizer=None, bridge_max_norm=1.0,
+    bridge_accumulation_steps=8,
 ):
     """Training epoch with graph-level mini-batching.
 
@@ -189,10 +193,24 @@ def train_epoch_batched(
     total_loss = 0.0
     n_samples = 0
 
+    # Collect bridge params for separate clipping
+    bridge_params = []
+    main_params = []
+    if bridge_optimizer is not None:
+        for pg in bridge_optimizer.param_groups:
+            bridge_params.extend(pg['params'])
+        for pg in optimizer.param_groups:
+            main_params.extend(pg['params'])
+
     # Create mini-batches
     indices = list(range(len(dataset)))
     random.shuffle(indices)
     batches = [indices[i:i + batch_size] for i in range(0, len(indices), batch_size)]
+
+    # Bridge accumulation counter (bridges step less frequently)
+    bridge_batch_count = 0
+    if bridge_optimizer is not None:
+        bridge_optimizer.zero_grad()
 
     for batch_indices in batches:
         optimizer.zero_grad()
@@ -206,12 +224,17 @@ def train_epoch_batched(
             batch_loss = torch.tensor(0.0, device=device, requires_grad=True)
             valid_count = 0
             for logits, answer in results:
-                loss = torch.nn.functional.cross_entropy(
-                    logits.unsqueeze(0),
-                    torch.tensor([answer], device=device),
-                    label_smoothing=label_smoothing,
-                    weight=class_weights,
-                )
+                target = torch.tensor([answer], device=device)
+                if loss_fn == 'focal':
+                    loss = focal_loss(logits.unsqueeze(0), target,
+                                      gamma=focal_gamma, alpha=class_weights,
+                                      label_smoothing=label_smoothing)
+                else:
+                    loss = torch.nn.functional.cross_entropy(
+                        logits.unsqueeze(0), target,
+                        label_smoothing=label_smoothing,
+                        weight=class_weights,
+                    )
                 if not (torch.isnan(loss) or torch.isinf(loss)):
                     batch_loss = batch_loss + loss
                     valid_count += 1
@@ -229,11 +252,33 @@ def train_epoch_batched(
 
         if valid_count > 0 and not (torch.isnan(batch_loss) or torch.isinf(batch_loss)):
             batch_loss.backward()
-            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+
+            # Main optimizer: step every batch
+            if bridge_optimizer is not None:
+                gn = torch.nn.utils.clip_grad_norm_(main_params, max_norm)
+            else:
+                gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             if torch.isfinite(gn):
                 optimizer.step()
+
+            # Bridge optimizer: step every bridge_accumulation_steps batches
+            if bridge_optimizer is not None:
+                bridge_batch_count += 1
+                if bridge_batch_count % bridge_accumulation_steps == 0:
+                    bgn = torch.nn.utils.clip_grad_norm_(bridge_params, bridge_max_norm)
+                    if torch.isfinite(bgn):
+                        bridge_optimizer.step()
+                    bridge_optimizer.zero_grad()
+
             total_loss += batch_loss.item() * valid_count
             n_samples += valid_count
+
+    # Final bridge step for remaining accumulated gradients
+    if bridge_optimizer is not None and bridge_batch_count % bridge_accumulation_steps != 0:
+        bgn = torch.nn.utils.clip_grad_norm_(bridge_params, bridge_max_norm)
+        if torch.isfinite(bgn):
+            bridge_optimizer.step()
+        bridge_optimizer.zero_grad()
 
     return total_loss / max(n_samples, 1)
 

@@ -35,6 +35,7 @@ from src.training.batch_utils import train_epoch_batched, evaluate_batched
 from src.training.class_weights import compute_class_weights
 from src.training.contrastive_loss import SemanticContrastiveLoss
 from src.training.feature_replay import FeatureReplayBuffer
+from src.training.focal_loss import focal_loss
 from src.topology_observer import TopologyObserver
 
 # Phase task lists
@@ -76,8 +77,13 @@ def _rebuild_classifier(model, task: str):
     model.classifier[-1].to(next(model.parameters()).device)
 
 
-def _build_dsm_optimizer(model, config):
-    """Build optimizer with 3 param groups: GNN/TAT, DSM/adapter, TopoBridge.
+def _build_dsm_optimizers(model, config):
+    """Build separate optimizers for main params and bridge params.
+
+    Returns (main_optimizer, bridge_optimizer) tuple.
+
+    main_optimizer: GNN/TAT + DSM/adapter params (2 groups, different LR).
+    bridge_optimizer: TopoBridge params only (separate clipping + accumulation).
 
     Handles both Track 1 (DSM) and Track 2 (Qwen adapter) backends.
     """
@@ -103,13 +109,22 @@ def _build_dsm_optimizer(model, config):
     # Use adapter_learning_rate for Track 2, dsm_learning_rate for Track 1
     semantic_lr = tc.get('adapter_learning_rate',
                          tc.get('dsm_learning_rate', 5e-4))
+    wd = tc.get('weight_decay', 0.01)
 
-    param_groups = [
+    main_groups = [
         {'params': gnn_tat_params, 'lr': tc['learning_rate']},
         {'params': dsm_params, 'lr': semantic_lr},
-        {'params': bridge_params, 'lr': tc.get('bridge_learning_rate', 1e-4)},
     ]
-    return torch.optim.AdamW(param_groups, weight_decay=tc.get('weight_decay', 0.01))
+    main_optimizer = torch.optim.AdamW(main_groups, weight_decay=wd)
+
+    bridge_optimizer = None
+    if bridge_params:
+        bridge_optimizer = torch.optim.AdamW(
+            [{'params': bridge_params, 'lr': tc.get('bridge_learning_rate', 1e-4)}],
+            weight_decay=wd,
+        )
+
+    return main_optimizer, bridge_optimizer
 
 
 def _create_replay_dataset(phase_a_datasets, replay_fraction=0.2, target_size=None):
@@ -130,12 +145,28 @@ def _create_replay_dataset(phase_a_datasets, replay_fraction=0.2, target_size=No
     return replay_samples
 
 
+def _compute_loss(logits, answer, device, loss_fn='ce', gamma=2.0,
+                  label_smoothing=0.0, class_weights=None):
+    """Compute classification loss (CE or focal)."""
+    target = torch.tensor([answer], device=device)
+    if loss_fn == 'focal':
+        return focal_loss(logits.unsqueeze(0), target, gamma=gamma,
+                          alpha=class_weights, label_smoothing=label_smoothing)
+    return torch.nn.functional.cross_entropy(
+        logits.unsqueeze(0), target,
+        label_smoothing=label_smoothing, weight=class_weights,
+    )
+
+
 def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
                 label_smoothing=0.0, device=None, use_amp=False,
                 topo_features=None, task=None,
                 class_weights=None,
                 contrastive_fn=None, contrastive_weight=0.0,
-                feature_replay=None, current_task=None):
+                feature_replay=None, current_task=None,
+                loss_fn='ce', focal_gamma=2.0,
+                bridge_optimizer=None, bridge_max_norm=1.0,
+                bridge_accumulation_steps=8):
     """Standard training loop -- no gate penalty."""
     if device is None:
         device = torch.device('cpu')
@@ -146,6 +177,17 @@ def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
     amp_enabled = use_amp and device.type == 'cuda'
     total_loss = 0.0
     optimizer.zero_grad()
+    if bridge_optimizer is not None:
+        bridge_optimizer.zero_grad()
+
+    # Collect bridge params for separate clipping
+    bridge_params = []
+    main_params = []
+    if bridge_optimizer is not None:
+        for pg in bridge_optimizer.param_groups:
+            bridge_params.extend(pg['params'])
+        for pg in optimizer.param_groups:
+            main_params.extend(pg['params'])
 
     for i in range(len(dataset)):
         cc, query, target, answer, metadata = _unpack_sample(dataset[i])
@@ -154,11 +196,9 @@ def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
         with torch.amp.autocast('cuda', enabled=amp_enabled, dtype=torch.bfloat16):
             logits = model(cc, query, target, metadata=metadata,
                            topo_features=topo_features, task=task)
-            loss = torch.nn.functional.cross_entropy(
-                logits.unsqueeze(0),
-                torch.tensor([answer], device=device),
-                label_smoothing=label_smoothing,
-                weight=class_weights,
+            loss = _compute_loss(
+                logits, answer, device, loss_fn=loss_fn, gamma=focal_gamma,
+                label_smoothing=label_smoothing, class_weights=class_weights,
             ) / accumulation_steps
 
         if torch.isnan(loss) or torch.isinf(loss):
@@ -178,11 +218,23 @@ def train_epoch(model, dataset, optimizer, max_norm=5.0, accumulation_steps=4,
         if feature_replay is not None and hasattr(model, '_last_combined'):
             feature_replay.save(current_task or task or '', model._last_combined, answer)
 
+        # Main optimizer: step every accumulation_steps
         if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataset):
-            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            if bridge_optimizer is not None:
+                gn = torch.nn.utils.clip_grad_norm_(main_params, max_norm)
+            else:
+                gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             if torch.isfinite(gn):
                 optimizer.step()
             optimizer.zero_grad()
+
+        # Bridge optimizer: step every bridge_accumulation_steps
+        if bridge_optimizer is not None:
+            if (i + 1) % bridge_accumulation_steps == 0 or (i + 1) == len(dataset):
+                bgn = torch.nn.utils.clip_grad_norm_(bridge_params, bridge_max_norm)
+                if torch.isfinite(bgn):
+                    bridge_optimizer.step()
+                bridge_optimizer.zero_grad()
 
     return total_loss / max(len(dataset), 1)
 
@@ -193,7 +245,10 @@ def train_epoch_with_replay(model, dataset, replay_samples, optimizer,
                             main_task=None, topo_features=None,
                             class_weights=None,
                             contrastive_fn=None, contrastive_weight=0.0,
-                            feature_replay=None):
+                            feature_replay=None,
+                            loss_fn='ce', focal_gamma=2.0,
+                            bridge_optimizer=None, bridge_max_norm=1.0,
+                            bridge_accumulation_steps=8):
     """Training loop that interleaves replay samples from earlier phases.
 
     replay_samples is a list of (sample, task_type) tuples. With multi-head
@@ -210,6 +265,17 @@ def train_epoch_with_replay(model, dataset, replay_samples, optimizer,
     amp_enabled = use_amp and device.type == 'cuda'
     total_loss = 0.0
     optimizer.zero_grad()
+    if bridge_optimizer is not None:
+        bridge_optimizer.zero_grad()
+
+    # Collect bridge params for separate clipping
+    bridge_params = []
+    main_params = []
+    if bridge_optimizer is not None:
+        for pg in bridge_optimizer.param_groups:
+            bridge_params.extend(pg['params'])
+        for pg in optimizer.param_groups:
+            main_params.extend(pg['params'])
 
     # Interleave: main dataset samples + replay samples
     main_indices = list(range(len(dataset)))
@@ -252,11 +318,9 @@ def train_epoch_with_replay(model, dataset, replay_samples, optimizer,
             # Only apply class_weights for main task samples — replay samples
             # have different class counts and would cause shape mismatch
             wt = class_weights if source == 'main' else None
-            loss = torch.nn.functional.cross_entropy(
-                logits.unsqueeze(0),
-                torch.tensor([answer], device=device),
-                label_smoothing=label_smoothing,
-                weight=wt,
+            loss = _compute_loss(
+                logits, answer, device, loss_fn=loss_fn, gamma=focal_gamma,
+                label_smoothing=label_smoothing, class_weights=wt,
             ) / accumulation_steps
 
         if torch.isnan(loss) or torch.isinf(loss):
@@ -279,11 +343,23 @@ def train_epoch_with_replay(model, dataset, replay_samples, optimizer,
 
         step_count += 1
 
+        # Main optimizer: step every accumulation_steps
         if step_count % accumulation_steps == 0 or step_count == len(schedule):
-            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            if bridge_optimizer is not None:
+                gn = torch.nn.utils.clip_grad_norm_(main_params, max_norm)
+            else:
+                gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             if torch.isfinite(gn):
                 optimizer.step()
             optimizer.zero_grad()
+
+        # Bridge optimizer: step every bridge_accumulation_steps
+        if bridge_optimizer is not None:
+            if step_count % bridge_accumulation_steps == 0 or step_count == len(schedule):
+                bgn = torch.nn.utils.clip_grad_norm_(bridge_params, bridge_max_norm)
+                if torch.isfinite(bgn):
+                    bridge_optimizer.step()
+                bridge_optimizer.zero_grad()
 
     return total_loss / max(step_count, 1)
 
@@ -330,14 +406,14 @@ def _load_or_generate(
 
 
 def _feature_replay_step(model, feature_replay, replay_ratio, optimizer,
-                         device, label_smoothing, max_norm, use_multi_head, task):
+                         device, label_smoothing, max_norm, use_multi_head, task,
+                         loss_fn='ce', focal_gamma=2.0):
     """Classifier-only replay from feature buffer.
 
     Replays stored penultimate-layer features through the classifier head(s)
     for tasks OTHER than the current task. Cheap alternative to full forward
     passes for catastrophic forgetting prevention.
     """
-    import torch.nn.functional as F
     model.train()
     for replay_task in feature_replay.tasks():
         if replay_task == task:
@@ -351,9 +427,9 @@ def _feature_replay_step(model, feature_replay, replay_ratio, optimizer,
                 logits = model.multi_head_classifier(feat.unsqueeze(0), replay_task).squeeze(0)
             else:
                 logits = model.classifier(feat)
-            r_loss = F.cross_entropy(logits.unsqueeze(0),
-                                     torch.tensor([label], device=device),
-                                     label_smoothing=label_smoothing)
+            r_loss = _compute_loss(logits, label, device, loss_fn=loss_fn,
+                                   gamma=focal_gamma,
+                                   label_smoothing=label_smoothing)
             r_loss.backward()
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         if torch.isfinite(gn):
@@ -395,6 +471,8 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
     phase_d_epoch_map = config.get('phase_d', {}).get('epochs', {})
     patience = tc.get('patience', 10)
     label_smoothing = tc.get('label_smoothing', 0.1)
+    loss_fn = tc.get('loss_fn', 'ce')  # 'ce' or 'focal'
+    focal_gamma = tc.get('focal_gamma', 2.0)
     accumulation_steps = tc.get('accumulation_steps', 4)
     max_norm = tc.get('max_norm', 5.0)
     use_batched = tc.get('use_batched', False)
@@ -472,13 +550,33 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
         # Per-task epoch count (Phase D tasks may have individual counts)
         task_epochs = phase_d_epoch_map.get(task, num_epochs)
 
-        # Build per-component optimizer
-        optimizer = _build_dsm_optimizer(model, config)
+        # Build separate optimizers for main params and bridge params
+        optimizer, bridge_optimizer = _build_dsm_optimizers(model, config)
+        bridge_max_norm = tc.get('bridge_max_norm', 1.0)
+        bridge_accumulation_steps = tc.get('bridge_accumulation_steps', 8)
 
-        # Cosine annealing scheduler
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=task_epochs,
-        )
+        # CosineAnnealingWarmRestarts scheduler (maintains LR floor)
+        scheduler_eta_min = tc.get('scheduler_eta_min', 1e-5)
+        scheduler_type = tc.get('scheduler', 'cosine_warm_restarts')
+        if scheduler_type == 'cosine_warm_restarts':
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer, T_0=task_epochs, T_mult=1, eta_min=scheduler_eta_min,
+            )
+            bridge_scheduler = None
+            if bridge_optimizer is not None:
+                bridge_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                    bridge_optimizer, T_0=task_epochs, T_mult=1,
+                    eta_min=scheduler_eta_min / 10,
+                )
+        else:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=task_epochs,
+            )
+            bridge_scheduler = None
+            if bridge_optimizer is not None:
+                bridge_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    bridge_optimizer, T_max=task_epochs,
+                )
 
         best_val_acc = 0.0
         patience_counter = 0
@@ -509,17 +607,47 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     print(f"    [UNFREEZE] DSM frozen (epoch 0-{freeze_epochs-1})")
                 elif epoch == freeze_epochs:
                     dsm_backend.unfreeze_top_n(unfreeze_top_n)
-                    optimizer = _build_dsm_optimizer(model, config)
-                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                        optimizer, T_max=task_epochs - epoch,
-                    )
+                    optimizer, bridge_optimizer = _build_dsm_optimizers(model, config)
+                    remaining = task_epochs - epoch
+                    if scheduler_type == 'cosine_warm_restarts':
+                        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                            optimizer, T_0=remaining, T_mult=1, eta_min=scheduler_eta_min,
+                        )
+                        if bridge_optimizer is not None:
+                            bridge_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                                bridge_optimizer, T_0=remaining, T_mult=1,
+                                eta_min=scheduler_eta_min / 10,
+                            )
+                    else:
+                        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                            optimizer, T_max=remaining,
+                        )
+                        if bridge_optimizer is not None:
+                            bridge_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                                bridge_optimizer, T_max=remaining,
+                            )
                     print(f"    [UNFREEZE] Top {unfreeze_top_n} layers unfrozen")
                 elif epoch == unfreeze_top_n_epochs:
                     dsm_backend.unfreeze_all()
-                    optimizer = _build_dsm_optimizer(model, config)
-                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                        optimizer, T_max=task_epochs - epoch,
-                    )
+                    optimizer, bridge_optimizer = _build_dsm_optimizers(model, config)
+                    remaining = task_epochs - epoch
+                    if scheduler_type == 'cosine_warm_restarts':
+                        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                            optimizer, T_0=remaining, T_mult=1, eta_min=scheduler_eta_min,
+                        )
+                        if bridge_optimizer is not None:
+                            bridge_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                                bridge_optimizer, T_0=remaining, T_mult=1,
+                                eta_min=scheduler_eta_min / 10,
+                            )
+                    else:
+                        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                            optimizer, T_max=remaining,
+                        )
+                        if bridge_optimizer is not None:
+                            bridge_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                                bridge_optimizer, T_max=remaining,
+                            )
                     print(f"    [UNFREEZE] All DSM layers unfrozen")
 
             # Active mode: get cached topo_features from observer
@@ -540,6 +668,10 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     class_weights=class_wt,
                     contrastive_fn=contrastive_fn,
                     contrastive_weight=contrastive_weight,
+                    loss_fn=loss_fn, focal_gamma=focal_gamma,
+                    bridge_optimizer=bridge_optimizer,
+                    bridge_max_norm=bridge_max_norm,
+                    bridge_accumulation_steps=bridge_accumulation_steps,
                 )
             elif replay_samples:
                 # Replay with interleaving (sequential — replay mixes tasks)
@@ -558,6 +690,10 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     contrastive_fn=contrastive_fn,
                     contrastive_weight=contrastive_weight,
                     feature_replay=feature_replay,
+                    loss_fn=loss_fn, focal_gamma=focal_gamma,
+                    bridge_optimizer=bridge_optimizer,
+                    bridge_max_norm=bridge_max_norm,
+                    bridge_accumulation_steps=bridge_accumulation_steps,
                 )
             else:
                 loss = train_epoch(
@@ -574,13 +710,18 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     contrastive_weight=contrastive_weight,
                     feature_replay=feature_replay,
                     current_task=task,
+                    loss_fn=loss_fn, focal_gamma=focal_gamma,
+                    bridge_optimizer=bridge_optimizer,
+                    bridge_max_norm=bridge_max_norm,
+                    bridge_accumulation_steps=bridge_accumulation_steps,
                 )
 
             # Feature replay: classifier-only rehearsal on previous tasks
             if feature_replay is not None and feature_replay.tasks():
                 _feature_replay_step(model, feature_replay, replay_ratio,
                                      optimizer, device, label_smoothing,
-                                     max_norm, use_multi_head, task)
+                                     max_norm, use_multi_head, task,
+                                     loss_fn=loss_fn, focal_gamma=focal_gamma)
 
             # Evaluation
             if not use_multi_head:
@@ -610,10 +751,14 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                 patience_counter += 1
 
             cur_lrs = [g['lr'] for g in optimizer.param_groups]
+            if bridge_optimizer is not None:
+                cur_lrs.extend(g['lr'] for g in bridge_optimizer.param_groups)
             lr_str = "/".join(f"{lr:.6f}" for lr in cur_lrs)
             print(f"    Ep {epoch:3d} | loss {loss:.4f} | "
                   f"val {val_acc:.3f} | lr {lr_str} | {elapsed:.0f}s{marker}")
             scheduler.step()
+            if bridge_scheduler is not None:
+                bridge_scheduler.step()
 
             # Topology observer: periodic analysis
             if observer is not None and observer.should_analyze(epoch):
