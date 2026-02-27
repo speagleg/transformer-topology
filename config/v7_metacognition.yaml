@@ -61,7 +61,7 @@ training:
   max_norm: 5.0
   accumulation_steps: 4
   replay_ratio: 0.5
-  use_class_weights: true
+  use_class_weights: false          # disabled — focal loss + class_weights = pathological
   contrastive_loss_weight: 0.0   # was 0.1 — disabled, focal loss handles hard example focus
 
 topology_observer:
@@ -98,5 +98,5 @@ phase_d:
   kg_val_samples: 500
   replay_structural_ratio: 0.2
   replay_semantic_ratio: 0.1
-  semantic_weight_init: -1.0   # override loaded bias (sigmoid≈0.27), let text features in
+  semantic_weight_init: 1.0    # override loaded bias (sigmoid≈0.73), KG tasks need semantic features
   resume_from: data/v6_track2/checkpoints/phase_c_labeled_reasoning_best.pt
