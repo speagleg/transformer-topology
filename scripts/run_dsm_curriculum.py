@@ -148,6 +148,42 @@ def _build_dsm_optimizers(model, config):
     return main_optimizer, bridge_optimizer
 
 
+def _rebalance_dataset(dataset, max_ratio=5.0):
+    """Rebalance a dataset by undersampling the majority class.
+
+    Caps each class at max_ratio * median_class_count to reduce extreme
+    imbalance (e.g. 86% RelatedTo in ConceptNet).  Minority classes are
+    left untouched.  Modifies dataset.samples in place.
+    """
+    from collections import Counter
+    labels = [s[3] if len(s) == 5 else s[-1] for s in dataset.samples]
+    counter = Counter(labels)
+    if len(counter) <= 1:
+        return dataset
+
+    counts = sorted(counter.values())
+    median_count = counts[len(counts) // 2]
+    cap = int(max_ratio * max(median_count, 1))
+
+    by_class = {}
+    for s, label in zip(dataset.samples, labels):
+        by_class.setdefault(label, []).append(s)
+
+    rebalanced = []
+    for label, samples in by_class.items():
+        if len(samples) > cap:
+            rebalanced.extend(random.sample(samples, cap))
+            print(f"    Rebalance: class {label} capped {len(samples)} -> {cap}")
+        else:
+            rebalanced.extend(samples)
+
+    random.shuffle(rebalanced)
+    orig_len = len(dataset.samples)
+    dataset.samples = rebalanced
+    print(f"    Rebalanced: {orig_len} -> {len(rebalanced)} samples")
+    return dataset
+
+
 def _create_replay_dataset(phase_a_datasets, replay_fraction=0.2, target_size=None):
     """Sample replay_fraction of Phase A datasets for task replay.
 
@@ -554,6 +590,10 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
             topologies=all_topos, n_nodes_range=train_range,
             **extra_gen_kwargs,
         )
+        # Rebalance heavily-skewed KG datasets (e.g. 86% RelatedTo)
+        if task.startswith("kg_"):
+            _rebalance_dataset(train_ds)
+
         datasets[task] = train_ds
 
         # Class weights for imbalanced tasks
