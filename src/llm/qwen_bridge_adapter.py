@@ -27,20 +27,30 @@ class QwenBridgeAdapter(nn.Module):
         })
         self._task_to_id = {name: i for i, name in enumerate(TASK_REGISTRY.keys())}
 
+    def _extract_task_name(self, task_text):
+        """Extract task name from task_prompt string or bare task name."""
+        if task_text is None:
+            return None
+        # task_prompt format: "... | task=<name>"
+        if 'task=' in task_text:
+            return task_text.split('task=')[-1].strip()
+        return task_text
+
     def forward(self, node_embeddings, semantic_weight, task_text=None, node_texts=None):
         """Forward pass matching TopoBridge signature.
 
         Args:
             node_embeddings: (N, topo_dim) from GNN
             semantic_weight: scalar gate value (unused here, applied by caller)
-            task_text: task name string for task embedding lookup
+            task_text: task name or full task_prompt string for task embedding lookup
             node_texts: optional list of concept strings per node for KG tasks
 
         Returns:
             (semantic_features, semantic_bias, semantic_features, graph_embedding)
         """
+        task_name = self._extract_task_name(task_text)
         task_id = torch.tensor(
-            self._task_to_id.get(task_text, 0), device=node_embeddings.device,
+            self._task_to_id.get(task_name, 0), device=node_embeddings.device,
         )
         sem_feat, sem_bias, graph_emb = self.backend.forward_graph(
             node_embeddings, task_id, node_texts=node_texts,

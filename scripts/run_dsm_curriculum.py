@@ -46,17 +46,38 @@ PHASE_D_TASKS = ["kg_relation", "kg_concept", "kg_pathvalid", "kg_analogy", "kg_
 
 
 def _load_state_filtered(model, state_dict):
-    """Load state dict, skipping keys with shape mismatches (e.g. num_tasks changed)."""
+    """Load state dict, partial-copying keys with shape mismatches (e.g. num_tasks changed).
+
+    When checkpoint tensor is smaller than model tensor (e.g. task_embedding grew
+    from 14→19 tasks), copies the overlapping region and keeps the model's init
+    for the rest. This preserves learned weights instead of discarding them.
+    """
     model_state = model.state_dict()
     filtered = {}
     skipped = []
     for k, v in state_dict.items():
         if k in model_state and model_state[k].shape != v.shape:
-            skipped.append(f"{k}: ckpt={list(v.shape)} vs model={list(model_state[k].shape)}")
+            model_shape = model_state[k].shape
+            if len(v.shape) == len(model_shape):
+                # Partial copy: start from model's current init, overlay checkpoint data
+                new_v = model_state[k].clone()
+                min_dims = tuple(min(s1, s2) for s1, s2 in zip(v.shape, model_shape))
+                slices = tuple(slice(0, d) for d in min_dims)
+                new_v[slices] = v[slices]
+                filtered[k] = new_v
+                skipped.append(
+                    f"{k}: ckpt={list(v.shape)} vs model={list(model_shape)}"
+                    f" — partial copy {list(min_dims)}"
+                )
+            else:
+                skipped.append(
+                    f"{k}: ckpt={list(v.shape)} vs model={list(model_shape)}"
+                    f" — skipped (rank mismatch)"
+                )
             continue
         filtered[k] = v
     if skipped:
-        print(f"  Skipped {len(skipped)} size-mismatched keys:")
+        print(f"  Handled {len(skipped)} size-mismatched keys:")
         for s in skipped:
             print(f"    {s}")
     model.load_state_dict(filtered, strict=False)
@@ -507,6 +528,7 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
             _rebuild_classifier(model, task)
         elif hasattr(model, 'multi_head_classifier') and model.multi_head_classifier is not None:
             model.multi_head_classifier.add_task(task, get_max_classes(task))
+            model.multi_head_classifier.heads[task].to(device)
 
         # Load/generate datasets
         extra_gen_kwargs = {}
