@@ -87,7 +87,7 @@ class QwenGraphBackend(nn.Module):
             if self.llm is None:
                 self._load_qwen()
 
-            # Build input: graph tokens + optional text tokens
+            # Build input: graph tokens + optional text tokens (capped at 128 tokens)
             if node_texts is not None:
                 text_prompt = "Graph nodes: " + ", ".join(
                     f"{i}={t}" for i, t in enumerate(node_texts)
@@ -95,7 +95,9 @@ class QwenGraphBackend(nn.Module):
                 if not hasattr(self, '_tokenizer'):
                     from transformers import AutoTokenizer
                     self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-                text_ids = self._tokenizer(text_prompt, return_tensors="pt").input_ids
+                text_ids = self._tokenizer(
+                    text_prompt, return_tensors="pt", max_length=128, truncation=True,
+                ).input_ids
                 text_ids = text_ids.to(node_embeddings.device)
                 text_emb = self.llm.model.embed_tokens(text_ids).squeeze(0)
                 combined = torch.cat([graph_tokens, text_emb], dim=0)

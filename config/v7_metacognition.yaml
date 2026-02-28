@@ -34,7 +34,7 @@ llm:
   llm_dim: 2048
   num_tokens: 16
   adapter_layers: 2
-  extract_layer: -1             # use final layer (was 16 — missed fine-tuned layers)
+  extract_layer: 16              # middle layer — best transfer representations (final layer is too task-specific)
   num_trainable_layers: 0       # frozen — gradient surgery OOMs on 24GB RTX 4090
   num_tasks: 19  # 14 original + 5 KG tasks
   use_mock: false  # Real Qwen for Phase D
