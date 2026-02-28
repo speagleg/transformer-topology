@@ -104,18 +104,11 @@ class QwenGraphBackend(nn.Module):
 
             # Cast to Qwen's dtype (fp16) for forward pass
             combined_half = combined.to(self.llm.dtype)
-            if self.num_trainable_layers > 0:
-                # Gradients flow through unfrozen layers
+            with torch.no_grad():
                 out = self.llm(
                     inputs_embeds=combined_half.unsqueeze(0),
                     output_hidden_states=True,
                 )
-            else:
-                with torch.no_grad():
-                    out = self.llm(
-                        inputs_embeds=combined_half.unsqueeze(0),
-                        output_hidden_states=True,
-                    )
             hidden = out.hidden_states[self.extract_layer].squeeze(0)
             hidden = hidden.to(graph_tokens.dtype)
             # Split into graph and text hidden states

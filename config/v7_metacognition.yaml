@@ -11,7 +11,7 @@ model:
   tat_spatial_heads: 4
   tat_spectral_heads: 4
   tat_ff_dim: 128
-  max_iterations: 2           # was 5 — 2 Qwen forwards/sample (2.5x speedup)
+  max_iterations: 2           # 2 iterations per sample
   convergence_threshold: 0.05
   use_higher_order: true
   use_topological_pe: true
@@ -35,7 +35,7 @@ llm:
   num_tokens: 16
   adapter_layers: 2
   extract_layer: -1             # use final layer (was 16 — missed fine-tuned layers)
-  num_trainable_layers: 1       # unfreeze last 1 Qwen layer (2 OOMs on 24GB)
+  num_trainable_layers: 0       # frozen — gradient surgery OOMs on 24GB RTX 4090
   num_tasks: 19  # 14 original + 5 KG tasks
   use_mock: false  # Real Qwen for Phase D
 
