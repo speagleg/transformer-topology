@@ -168,7 +168,11 @@ class HierarchicalMultiHopModel(nn.Module):
             self.topo_bridge = None
 
         # hodge(3) + wave_energy(1) + persistence(32)
-        classifier_input_dim = 3 * embedding_dim + 3 + 1 + PERSISTENCE_FEATURES
+        base_classifier_dim = 3 * embedding_dim + 3 + 1 + PERSISTENCE_FEATURES
+        # Approach C: text features concatenated to classifier input (query + target + diff)
+        text_feat_dim = embedding_dim if (use_llm and backend_type == 'qwen') else 0
+        self.text_feat_dim = text_feat_dim
+        classifier_input_dim = base_classifier_dim + 3 * text_feat_dim
         self.classifier_input_dim = classifier_input_dim
         self.classifier = nn.Sequential(
             nn.Linear(classifier_input_dim, 4 * embedding_dim),
@@ -240,27 +244,33 @@ class HierarchicalMultiHopModel(nn.Module):
             self._last_semantic_features = diagnostics['semantic_features']
             self._last_adjacency = cc.adjacency_matrix(0)
 
-        # LLM integration: blend executive output with TopoBridge output
+        # LLM integration
+        text_features = None
         if self.use_llm and self.topo_bridge is not None and not self.bypass_llm:
-            control_signals = diagnostics.get('control_signals', [])
-            if control_signals:
-                semantic_weight = control_signals[-1].semantic_weight
+            if hasattr(self.topo_bridge, 'extract_text_features'):
+                # Approach C (Qwen): per-node text features direct to classifier
+                node_texts = getattr(cc, 'node_texts', None) or None
+                if node_texts:
+                    text_features = self.topo_bridge.extract_text_features(
+                        node_texts, output.device,
+                    )
             else:
-                semantic_weight = torch.tensor(0.0, device=output.device)
-
-            task_text = None
-            if metadata and 'task_prompt' in metadata:
-                task_text = metadata['task_prompt']
-
-            node_texts = getattr(cc, 'node_texts', None) or None
-            llm_out, _semantic_bias, sem_feat, _graph_emb = self.topo_bridge(
-                output, semantic_weight, task_text, node_texts=node_texts,
-            )
-            self._last_semantic_features = sem_feat
-            self._last_adjacency = cc.adjacency_matrix(0)
-
-            # Blend: output = (1 - semantic_weight) * executive_output + semantic_weight * llm_out
-            output = (1 - semantic_weight).unsqueeze(-1) * output + semantic_weight.unsqueeze(-1) * llm_out
+                # Legacy blend (mock/llama): blend executive output with TopoBridge
+                control_signals = diagnostics.get('control_signals', [])
+                if control_signals:
+                    semantic_weight = control_signals[-1].semantic_weight
+                else:
+                    semantic_weight = torch.tensor(0.0, device=output.device)
+                task_text = None
+                if metadata and 'task_prompt' in metadata:
+                    task_text = metadata['task_prompt']
+                node_texts = getattr(cc, 'node_texts', None) or None
+                llm_out, _semantic_bias, sem_feat, _graph_emb = self.topo_bridge(
+                    output, semantic_weight, task_text, node_texts=node_texts,
+                )
+                self._last_semantic_features = sem_feat
+                self._last_adjacency = cc.adjacency_matrix(0)
+                output = (1 - semantic_weight).unsqueeze(-1) * output + semantic_weight.unsqueeze(-1) * llm_out
 
         query_emb = output[query_node]
         target_emb = output[target_node]
@@ -273,6 +283,16 @@ class HierarchicalMultiHopModel(nn.Module):
         persistence_features = self._compute_persistence_features(cc).to(dev)
         combined = torch.cat([query_emb, target_emb, diff_emb,
                               hodge_features, wave_energy, persistence_features])
+
+        # Approach C: concatenate text features for query/target/diff
+        if text_features is not None and self.text_feat_dim > 0:
+            text_q = text_features[query_node]
+            text_t = text_features[target_node]
+            combined = torch.cat([combined, text_q, text_t, text_q - text_t])
+        elif self.text_feat_dim > 0:
+            combined = torch.cat([combined,
+                                  torch.zeros(3 * self.text_feat_dim, device=dev)])
+
         self._last_combined = combined.detach()
 
         # Use multi-head classifier if available and task is specified

@@ -96,26 +96,35 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
                 model._last_semantic_features = diagnostics['semantic_features']
                 model._last_adjacency = ccs[g].adjacency_matrix(0)
 
-            # LLM integration at model level (legacy TopoBridge path)
-            # DSM path is handled inside executive_loop already
+            # LLM integration at model level
+            text_features = None
             if (model.use_llm and model.topo_bridge is not None
                     and not model.bypass_llm):
-                control_signals = diagnostics.get('control_signals', [])
-                if control_signals:
-                    semantic_weight = control_signals[-1].semantic_weight
+                if hasattr(model.topo_bridge, 'extract_text_features'):
+                    # Approach C (Qwen): per-node text features direct to classifier
+                    node_texts = getattr(ccs[g], 'node_texts', None) or None
+                    if node_texts:
+                        text_features = model.topo_bridge.extract_text_features(
+                            node_texts, output.device,
+                        )
                 else:
-                    semantic_weight = torch.tensor(0.0, device=output.device)
-                task_text = None
-                if metadatas[g] and 'task_prompt' in metadatas[g]:
-                    task_text = metadatas[g]['task_prompt']
-                node_texts = getattr(ccs[g], 'node_texts', None) or None
-                llm_out, _, sem_feat, _ = model.topo_bridge(
-                    output, semantic_weight, task_text, node_texts=node_texts,
-                )
-                model._last_semantic_features = sem_feat
-                model._last_adjacency = ccs[g].adjacency_matrix(0)
-                output = ((1 - semantic_weight).unsqueeze(-1) * output
-                          + semantic_weight.unsqueeze(-1) * llm_out)
+                    # Legacy blend (mock/llama)
+                    control_signals = diagnostics.get('control_signals', [])
+                    if control_signals:
+                        semantic_weight = control_signals[-1].semantic_weight
+                    else:
+                        semantic_weight = torch.tensor(0.0, device=output.device)
+                    task_text = None
+                    if metadatas[g] and 'task_prompt' in metadatas[g]:
+                        task_text = metadatas[g]['task_prompt']
+                    node_texts = getattr(ccs[g], 'node_texts', None) or None
+                    llm_out, _, sem_feat, _ = model.topo_bridge(
+                        output, semantic_weight, task_text, node_texts=node_texts,
+                    )
+                    model._last_semantic_features = sem_feat
+                    model._last_adjacency = ccs[g].adjacency_matrix(0)
+                    output = ((1 - semantic_weight).unsqueeze(-1) * output
+                              + semantic_weight.unsqueeze(-1) * llm_out)
 
             query_emb = output[queries[g]]
             target_emb = output[targets[g]]
@@ -130,6 +139,17 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
 
             combined = torch.cat([query_emb, target_emb, diff_emb,
                                   hodge_features, wave_energy, persistence_features])
+
+            # Approach C: concatenate text features for query/target/diff
+            text_feat_dim = getattr(model, 'text_feat_dim', 0)
+            if text_features is not None and text_feat_dim > 0:
+                text_q = text_features[queries[g]]
+                text_t = text_features[targets[g]]
+                combined = torch.cat([combined, text_q, text_t, text_q - text_t])
+            elif text_feat_dim > 0:
+                combined = torch.cat([combined,
+                                      torch.zeros(3 * text_feat_dim, device=dev)])
+
             model._last_combined = combined.detach()
 
             if task is not None and getattr(model, 'multi_head_classifier', None) is not None:
