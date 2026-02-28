@@ -27,7 +27,7 @@ class TestBatchedV6:
 
     def test_evaluate_batched_with_task(self):
         model, ds = self._make_model_and_data()
-        acc, loss = evaluate_batched(model, ds, batch_size=4, task="diverse")
+        acc, loss, *_ = evaluate_batched(model, ds, batch_size=4, task="diverse")
         assert 0 <= acc <= 1
         assert loss > 0
 

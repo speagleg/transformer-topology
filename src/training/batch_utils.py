@@ -12,7 +12,7 @@ Usage:
         model, dataset, optimizer, batch_size=8,
         device=device, use_amp=True,
     )
-    acc, val_loss = evaluate_batched(model, dataset, batch_size=8, device=device)
+    acc, val_loss, bal_acc = evaluate_batched(model, dataset, batch_size=8, device=device)
 """
 
 import random
@@ -313,6 +313,9 @@ def evaluate_batched(
     indices = list(range(len(dataset)))
     batches = [indices[i:i + batch_size] for i in range(0, len(indices), batch_size)]
 
+    class_correct = {}
+    class_total = {}
+
     for batch_indices in batches:
         samples = [_unpack_sample(dataset[i]) for i in batch_indices]
         results = _forward_batch(model, samples, device, task=task)
@@ -330,8 +333,12 @@ def evaluate_batched(
             pred = logits.argmax().item()
             if pred == answer:
                 correct += 1
+                class_correct[answer] = class_correct.get(answer, 0) + 1
+            class_total[answer] = class_total.get(answer, 0) + 1
             n_total += 1
 
     accuracy = correct / max(n_total, 1)
     avg_loss = total_loss / max(n_valid, 1)
-    return accuracy, avg_loss
+    per_class = [class_correct.get(c, 0) / class_total[c] for c in class_total]
+    bal_acc = sum(per_class) / len(per_class) if per_class else 0.0
+    return accuracy, avg_loss, bal_acc

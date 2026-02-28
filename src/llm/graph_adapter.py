@@ -49,10 +49,15 @@ class GraphFormerDecoder(nn.Module):
         self.bias_proj = nn.Linear(topo_dim, topo_dim)
         self.graph_pool = nn.Linear(llm_dim, topo_dim)
 
-    def forward(self, node_queries, llm_hidden_states):
+    def forward(self, node_queries, llm_hidden_states, text_hidden_states=None):
+        # Combine graph + text hidden states for richer cross-attention
+        if text_hidden_states is not None:
+            combined_hidden = torch.cat([llm_hidden_states, text_hidden_states], dim=0)
+        else:
+            combined_hidden = llm_hidden_states
         for layer in self.layers:
-            node_queries = layer(node_queries, llm_hidden_states)
+            node_queries = layer(node_queries, combined_hidden)
         features = self.feature_proj(node_queries)  # (N, topo_dim)
         bias = features @ self.bias_proj(features).T  # (N, N)
-        graph_emb = self.graph_pool(llm_hidden_states.mean(0))  # (topo_dim,)
+        graph_emb = self.graph_pool(combined_hidden.mean(0))  # (topo_dim,)
         return features, bias, graph_emb

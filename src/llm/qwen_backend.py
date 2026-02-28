@@ -1,7 +1,7 @@
-"""Frozen Qwen2.5-3B backend with GraphFormer adapter.
+"""Qwen2.5-3B backend with GraphFormer adapter.
 
-The LLM is fully frozen and 4-bit quantized. Only the GraphFormer
-encoder/decoder are trainable (~20M params).
+The LLM is mostly frozen with optional fine-tuning of the last N layers.
+GraphFormer encoder/decoder are always trainable (~20M params).
 """
 import torch
 import torch.nn as nn
@@ -10,7 +10,7 @@ from src.llm.graph_adapter import GraphFormerEncoder, GraphFormerDecoder
 
 
 class QwenGraphBackend(nn.Module):
-    """Frozen LLM + learned adapter for graph->semantic->graph translation."""
+    """LLM + learned adapter for graph->semantic->graph translation."""
 
     def __init__(self, config: dict):
         super().__init__()
@@ -21,7 +21,8 @@ class QwenGraphBackend(nn.Module):
         num_tasks = config.get("num_tasks", 14)
         use_mock = config.get("use_mock", False)
         self.llm_dim = llm_dim
-        self.extract_layer = config.get("extract_layer", 16)
+        self.extract_layer = config.get("extract_layer", -1)
+        self.num_trainable_layers = config.get("num_trainable_layers", 0)
         self.model_name = config.get("qwen_model", "Qwen/Qwen2.5-3B-Instruct-AWQ")
 
         self.encoder = GraphFormerEncoder(
@@ -47,7 +48,7 @@ class QwenGraphBackend(nn.Module):
             self.llm = None
 
     def _load_qwen(self):
-        """Load Qwen model (4-bit quantized if AWQ variant)."""
+        """Load Qwen model, optionally unfreezing last N layers."""
         from transformers import AutoModelForCausalLM
         self.llm = AutoModelForCausalLM.from_pretrained(
             self.model_name, device_map="cuda", torch_dtype=torch.float16,
@@ -55,6 +56,16 @@ class QwenGraphBackend(nn.Module):
         self.llm.eval()
         for p in self.llm.parameters():
             p.requires_grad = False
+        # Selectively unfreeze last N transformer layers
+        if self.num_trainable_layers > 0:
+            layers = self.llm.model.layers
+            for layer in layers[-self.num_trainable_layers:]:
+                for p in layer.parameters():
+                    p.requires_grad = True
+            # Gradient checkpointing: trade compute for VRAM on unfrozen layers
+            self.llm.gradient_checkpointing_enable()
+            print(f"  Qwen: unfroze last {self.num_trainable_layers}/{len(layers)} layers "
+                  f"(gradient checkpointing enabled)")
 
     def forward_graph(self, node_embeddings, task_id, node_texts=None):
         """Full graph->LLM->graph pipeline.
@@ -70,7 +81,8 @@ class QwenGraphBackend(nn.Module):
         graph_tokens = self.encoder(node_embeddings, task_id)
 
         if self._is_mock:
-            hidden = self.llm(graph_tokens)
+            graph_hidden = self.llm(graph_tokens)
+            text_hidden = None
         else:
             if self.llm is None:
                 self._load_qwen()
@@ -90,26 +102,46 @@ class QwenGraphBackend(nn.Module):
             else:
                 combined = graph_tokens
 
-            with torch.no_grad():
-                # Cast to Qwen's dtype (fp16) for forward pass
-                combined_half = combined.to(self.llm.dtype)
+            # Cast to Qwen's dtype (fp16) for forward pass
+            combined_half = combined.to(self.llm.dtype)
+            if self.num_trainable_layers > 0:
+                # Gradients flow through unfrozen layers
                 out = self.llm(
                     inputs_embeds=combined_half.unsqueeze(0),
                     output_hidden_states=True,
                 )
-                hidden = out.hidden_states[self.extract_layer].squeeze(0)
-                # Extract only graph token positions, cast back to model dtype (fp32)
-                hidden = hidden[:graph_tokens.shape[0]].to(graph_tokens.dtype)
+            else:
+                with torch.no_grad():
+                    out = self.llm(
+                        inputs_embeds=combined_half.unsqueeze(0),
+                        output_hidden_states=True,
+                    )
+            hidden = out.hidden_states[self.extract_layer].squeeze(0)
+            hidden = hidden.to(graph_tokens.dtype)
+            # Split into graph and text hidden states
+            num_graph = graph_tokens.shape[0]
+            graph_hidden = hidden[:num_graph]
+            text_hidden = hidden[num_graph:] if hidden.shape[0] > num_graph else None
 
         node_proj = self.encoder.input_proj(node_embeddings)
-        features, bias, graph_emb = self.decoder(node_proj, hidden)
+        features, bias, graph_emb = self.decoder(
+            node_proj, graph_hidden, text_hidden_states=text_hidden,
+        )
         return features, bias, graph_emb
 
     def trainable_parameters(self):
-        """Return only adapter parameters (not frozen LLM)."""
+        """Return adapter parameters + any unfrozen LLM layers."""
         yield from self.encoder.parameters()
         yield from self.decoder.parameters()
 
+    def llm_trainable_parameters(self):
+        """Return only unfrozen LLM layer parameters (for separate optimizer group)."""
+        if self.llm is not None and self.num_trainable_layers > 0:
+            layers = self.llm.model.layers
+            for layer in layers[-self.num_trainable_layers:]:
+                yield from layer.parameters()
+
     def parameters(self, recurse=True):
         """Return trainable parameters for optimizer."""
-        return self.trainable_parameters()
+        yield from self.trainable_parameters()
+        yield from self.llm_trainable_parameters()

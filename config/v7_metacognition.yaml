@@ -34,7 +34,8 @@ llm:
   llm_dim: 2048
   num_tokens: 16
   adapter_layers: 2
-  extract_layer: 16
+  extract_layer: -1             # use final layer (was 16 — missed fine-tuned layers)
+  num_trainable_layers: 1       # unfreeze last 1 Qwen layer (2 OOMs on 24GB)
   num_tasks: 19  # 14 original + 5 KG tasks
   use_mock: false  # Real Qwen for Phase D
 
@@ -43,6 +44,7 @@ training:
   learning_rate: 0.0003        # was 0.001 — gentle fine-tune for pre-trained GNN/TAT
   adapter_learning_rate: 0.001  # was 0.0001 — 10x boost, adapter must learn text features
   bridge_learning_rate: 0.0001   # was 0.0005 — lowered, bridge was drifting 12x more than GNN/TAT
+  qwen_learning_rate: 0.00001    # very low LR for fine-tuning frozen Qwen layers
   bridge_max_norm: 1.0           # separate grad clipping for bridge (vs 5.0 for main)
   bridge_accumulation_steps: 8   # bridge steps less frequently (vs 4 for main)
   weight_decay: 0.01

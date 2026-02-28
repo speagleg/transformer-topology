@@ -21,7 +21,8 @@ class QwenBridgeAdapter(nn.Module):
             'num_tokens': llm_config.get('num_tokens', 16),
             'adapter_layers': llm_config.get('adapter_layers', 2),
             'num_tasks': llm_config.get('num_tasks', 14),
-            'extract_layer': llm_config.get('extract_layer', 16),
+            'extract_layer': llm_config.get('extract_layer', -1),
+            'num_trainable_layers': llm_config.get('num_trainable_layers', 0),
             'use_mock': llm_config.get('use_mock', False),
             'qwen_model': llm_config.get('qwen_model', 'Qwen/Qwen2.5-3B-Instruct-AWQ'),
         })

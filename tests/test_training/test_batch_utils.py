@@ -356,7 +356,7 @@ class TestBatchedTraining:
         from src.training.batch_utils import evaluate_batched
 
         model, dataset = self._build_model_and_dataset(use_dsm=False)
-        acc, loss = evaluate_batched(
+        acc, loss, *_ = evaluate_batched(
             model, dataset, batch_size=4,
             device=torch.device('cpu'),
         )
@@ -368,7 +368,7 @@ class TestBatchedTraining:
         from src.training.batch_utils import evaluate_batched
 
         model, dataset = self._build_model_and_dataset(use_dsm=True)
-        acc, loss = evaluate_batched(
+        acc, loss, *_ = evaluate_batched(
             model, dataset, batch_size=4,
             device=torch.device('cpu'),
         )

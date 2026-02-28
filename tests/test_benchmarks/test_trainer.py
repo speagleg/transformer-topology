@@ -66,6 +66,6 @@ class TestTraining:
             max_hops=6, max_iterations=1,
         )
         ds = MultiHopDataset(num_samples=4, min_hops=2, max_hops=4, num_distractors=3, embedding_dim=16)
-        accuracy, avg_loss = evaluate(model, ds)
+        accuracy, avg_loss, *_ = evaluate(model, ds)
         assert 0.0 <= accuracy <= 1.0
         assert avg_loss > 0

@@ -334,6 +334,8 @@ def evaluate(model, dataset, label_smoothing=0.0, device=None, task=None):
     correct = 0
     total_loss = 0.0
     n_valid = 0
+    class_correct = {}
+    class_total = {}
     for i in range(len(dataset)):
         cc, query, target, answer, metadata = _unpack_sample(dataset[i])
         cc = cc.clone().to(device)
@@ -348,9 +350,14 @@ def evaluate(model, dataset, label_smoothing=0.0, device=None, task=None):
         pred = logits.argmax().item()
         if pred == answer:
             correct += 1
+            class_correct[answer] = class_correct.get(answer, 0) + 1
+        class_total[answer] = class_total.get(answer, 0) + 1
     accuracy = correct / len(dataset)
     avg_loss = total_loss / max(n_valid, 1)
-    return accuracy, avg_loss
+    # Balanced accuracy: mean of per-class recall
+    per_class = [class_correct.get(c, 0) / class_total[c] for c in class_total]
+    bal_acc = sum(per_class) / len(per_class) if per_class else 0.0
+    return accuracy, avg_loss, bal_acc
 
 
 @torch.no_grad()
@@ -417,8 +424,8 @@ def run_model(name, model, train_ds, test_ds, tc, device=None):
                                  accumulation_steps=tc.get("accumulation_steps", 4),
                                  label_smoothing=label_smoothing,
                                  device=device)
-        test_acc, test_loss = evaluate(model, test_ds, label_smoothing=label_smoothing,
-                                       device=device)
+        test_acc, test_loss, *_ = evaluate(model, test_ds, label_smoothing=label_smoothing,
+                                           device=device)
         elapsed = time.time() - start
 
         scheduler.step(test_loss)

@@ -93,41 +93,47 @@ class TestRebuildClassifier:
 
 
 class TestBuildDSMOptimizer:
-    def test_three_param_groups(self):
-        from scripts.run_dsm_curriculum import _build_dsm_optimizer
+    def test_param_groups(self):
+        from scripts.run_dsm_curriculum import _build_dsm_optimizers
         from src.benchmarks.run_benchmark_suite import _build_model
         config = {'training': {'learning_rate': 1e-3, 'dsm_learning_rate': 5e-4,
                                 'bridge_learning_rate': 1e-4, 'weight_decay': 0.01}}
         model = _build_model('hierarchical_llm', _MC, 11, torch.device('cpu'),
                               llm_config=_LC)
-        optimizer = _build_dsm_optimizer(model, config)
-        assert len(optimizer.param_groups) == 3
+        main_opt, bridge_opt = _build_dsm_optimizers(model, config)
+        assert len(main_opt.param_groups) == 2  # GNN/TAT + DSM/adapter
+        assert bridge_opt is not None
+        assert len(bridge_opt.param_groups) == 1  # bridge params
 
     def test_correct_learning_rates(self):
-        from scripts.run_dsm_curriculum import _build_dsm_optimizer
+        from scripts.run_dsm_curriculum import _build_dsm_optimizers
         from src.benchmarks.run_benchmark_suite import _build_model
         config = {'training': {'learning_rate': 1e-3, 'dsm_learning_rate': 5e-4,
                                 'bridge_learning_rate': 1e-4, 'weight_decay': 0.01}}
         model = _build_model('hierarchical_llm', _MC, 11, torch.device('cpu'),
                               llm_config=_LC)
-        optimizer = _build_dsm_optimizer(model, config)
-        assert optimizer.param_groups[0]['lr'] == 1e-3
-        assert optimizer.param_groups[1]['lr'] == 5e-4
-        assert optimizer.param_groups[2]['lr'] == 1e-4
+        main_opt, bridge_opt = _build_dsm_optimizers(model, config)
+        assert main_opt.param_groups[0]['lr'] == 1e-3
+        assert main_opt.param_groups[1]['lr'] == 5e-4
+        assert bridge_opt.param_groups[0]['lr'] == 1e-4
 
     def test_all_params_covered(self):
         """Every trainable param is in exactly one group."""
-        from scripts.run_dsm_curriculum import _build_dsm_optimizer
+        from scripts.run_dsm_curriculum import _build_dsm_optimizers
         from src.benchmarks.run_benchmark_suite import _build_model
         config = {'training': {'learning_rate': 1e-3, 'dsm_learning_rate': 5e-4,
                                 'bridge_learning_rate': 1e-4, 'weight_decay': 0.01}}
         model = _build_model('hierarchical_llm', _MC, 11, torch.device('cpu'),
                               llm_config=_LC)
-        optimizer = _build_dsm_optimizer(model, config)
+        main_opt, bridge_opt = _build_dsm_optimizers(model, config)
         opt_params = set()
-        for group in optimizer.param_groups:
+        for group in main_opt.param_groups:
             for p in group['params']:
                 opt_params.add(id(p))
+        if bridge_opt is not None:
+            for group in bridge_opt.param_groups:
+                for p in group['params']:
+                    opt_params.add(id(p))
         trainable = {id(p) for p in model.parameters() if p.requires_grad}
         assert opt_params == trainable
 
@@ -183,9 +189,9 @@ class TestTrainEpoch:
         assert loss > 0
 
     def test_with_dsm_optimizer(self):
-        """Training works with the 3-group DSM optimizer."""
+        """Training works with the split DSM optimizers."""
         from scripts.run_dsm_curriculum import (
-            train_epoch, _rebuild_classifier, _build_dsm_optimizer,
+            train_epoch, _rebuild_classifier, _build_dsm_optimizers,
         )
         from src.benchmarks.run_benchmark_suite import _build_model
         from src.benchmarks.benchmark_dataset import BenchmarkDataset
@@ -196,8 +202,9 @@ class TestTrainEpoch:
                               llm_config=_LC)
         _rebuild_classifier(model, 'diverse')
         ds = BenchmarkDataset(5, 'diverse', 10, 32)
-        optimizer = _build_dsm_optimizer(model, config)
-        loss = train_epoch(model, ds, optimizer, device=torch.device('cpu'))
+        main_opt, bridge_opt = _build_dsm_optimizers(model, config)
+        loss = train_epoch(model, ds, main_opt, device=torch.device('cpu'),
+                           bridge_optimizer=bridge_opt)
         assert isinstance(loss, float)
         assert loss > 0
 

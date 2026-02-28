@@ -138,8 +138,8 @@ def _train_and_evaluate(model, train_ds, val_ds, tc, device, checkpoint_path=Non
             label_smoothing=label_smoothing,
             device=device,
         )
-        val_acc, val_loss = evaluate(model, val_ds, label_smoothing=label_smoothing,
-                                     device=device)
+        val_acc, val_loss, *_ = evaluate(model, val_ds, label_smoothing=label_smoothing,
+                                         device=device)
         elapsed = time.time() - t0
 
         lr = optimizer.param_groups[0]['lr']
@@ -197,7 +197,7 @@ def _train_and_evaluate(model, train_ds, val_ds, tc, device, checkpoint_path=Non
 
 def _evaluate_dataset(model, dataset, device):
     """Evaluate model on a dataset, return accuracy."""
-    acc, _ = evaluate(model, dataset, device=device)
+    acc, *_ = evaluate(model, dataset, device=device)
     return acc
 
 

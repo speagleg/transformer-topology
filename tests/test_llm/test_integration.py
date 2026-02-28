@@ -128,7 +128,7 @@ class TestTrainEpoch:
     def test_evaluate_with_llm(self):
         model = HierarchicalMultiHopModel(**MODEL_KWARGS, use_llm=True, llm_config=LLM_CONFIG)
         ds = _make_dataset(8)
-        acc, loss = evaluate(model, ds)
+        acc, loss, *_ = evaluate(model, ds)
         assert 0.0 <= acc <= 1.0
         assert loss > 0
 
