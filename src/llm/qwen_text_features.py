@@ -127,8 +127,10 @@ class QwenTextFeatureExtractor(nn.Module):
             raw_embs.append(raw)
 
         # Stack and project (proj has gradients)
+        # Cast to proj dtype — embed_tokens may be fp16 while proj is fp32
         stacked = torch.stack(raw_embs)  # (N, llm_dim)
-        return self.proj(stacked.to(device))  # (N, text_feat_dim)
+        proj_dtype = self.proj[0].weight.dtype
+        return self.proj(stacked.to(device=device, dtype=proj_dtype))  # (N, text_feat_dim)
 
     def clear_cache(self):
         """Clear the embedding cache (e.g., between tasks)."""
