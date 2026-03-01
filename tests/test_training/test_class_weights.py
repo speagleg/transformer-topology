@@ -15,11 +15,14 @@ class TestClassWeights:
         weights = compute_class_weights(labels, num_classes=2)
         assert weights[1] > weights[0]
 
-    def test_missing_class_gets_max_weight(self):
+    def test_missing_class_gets_zero_weight(self):
+        """Missing classes (zero samples) get weight 0.0 — no contribution to loss."""
         labels = torch.tensor([0, 0, 1, 1])
         weights = compute_class_weights(labels, num_classes=3)
-        assert weights[2] >= weights[0]
-        assert weights[2] >= weights[1]
+        assert weights[2] == 0.0
+        # Present classes should still have positive weights
+        assert weights[0] > 0.0
+        assert weights[1] > 0.0
 
     def test_normalized(self):
         labels = torch.tensor([0, 0, 0, 1, 2, 2])
