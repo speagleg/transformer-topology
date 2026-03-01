@@ -44,6 +44,9 @@ PHASE_B_TASKS = ["graph_completion", "labeled_reasoning"]
 PHASE_C_TASKS = ["analogical_transfer", "graph_completion", "labeled_reasoning"]
 PHASE_D_TASKS = ["kg_relation", "kg_concept", "kg_pathvalid", "kg_analogy", "kg_cluster"]
 
+# All tasks for metacognitive consolidation
+PHASE_E_TASKS = sorted(set(PHASE_A_TASKS + PHASE_B_TASKS + PHASE_C_TASKS + PHASE_D_TASKS))
+
 
 def _load_state_filtered(model, state_dict):
     """Load state dict, partial-copying keys with shape mismatches (e.g. num_tasks changed).
@@ -103,7 +106,7 @@ def _build_dsm_optimizers(model, config):
 
     Returns (main_optimizer, bridge_optimizer) tuple.
 
-    main_optimizer: GNN/TAT + DSM/adapter params (2-3 groups, different LR).
+    main_optimizer: GNN/TAT + DSM/adapter + metacog + classifier params (multiple groups, different LR).
     bridge_optimizer: TopoBridge params only (separate clipping + accumulation).
 
     Handles both Track 1 (DSM) and Track 2 (Qwen adapter) backends.
@@ -113,6 +116,8 @@ def _build_dsm_optimizers(model, config):
     dsm_params = []
     bridge_params = []
     qwen_llm_params = []
+    metacog_params = []
+    classifier_params = []
 
     # Collect unfrozen Qwen LLM layer param IDs for exclusion
     qwen_llm_ids = set()
@@ -128,7 +133,13 @@ def _build_dsm_optimizers(model, config):
             continue
         if id(param) in qwen_llm_ids:
             continue  # already collected
-        if 'dsm' in name.lower() or 'distilled' in name.lower():
+        # Metacog params (controller + task_embedding)
+        if 'metacog' in name.lower() or 'metacognitive' in name.lower():
+            metacog_params.append(param)
+        # Classifier params (multi_head_classifier MLP heads + single-head classifier)
+        elif 'classifier' in name:
+            classifier_params.append(param)
+        elif 'dsm' in name.lower() or 'distilled' in name.lower():
             dsm_params.append(param)
         elif ('adapter' in name.lower() or 'graph_former' in name.lower()
               or 'graphformer' in name.lower()):
@@ -148,6 +159,16 @@ def _build_dsm_optimizers(model, config):
         {'params': gnn_tat_params, 'lr': tc['learning_rate']},
         {'params': dsm_params, 'lr': semantic_lr},
     ]
+    # Metacog group
+    if metacog_params:
+        metacog_lr = tc.get('metacog_learning_rate', 5e-4)
+        main_groups.append({'params': metacog_params, 'lr': metacog_lr})
+        print(f"  Optimizer: {len(metacog_params)} metacog params at lr={metacog_lr}")
+    # Classifier group
+    if classifier_params:
+        classifier_lr = tc.get('classifier_learning_rate', tc['learning_rate'])
+        main_groups.append({'params': classifier_params, 'lr': classifier_lr})
+        print(f"  Optimizer: {len(classifier_params)} classifier params at lr={classifier_lr}")
     # Add Qwen LLM fine-tune group if any layers are unfrozen
     if qwen_llm_params:
         qwen_lr = tc.get('qwen_learning_rate', 1e-5)
@@ -608,9 +629,10 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
             topologies=all_topos, n_nodes_range=train_range,
             **extra_gen_kwargs,
         )
-        # Rebalance heavily-skewed KG datasets (e.g. 86% RelatedTo)
-        if task.startswith("kg_"):
-            _rebalance_dataset(train_ds)
+        # KG datasets: use focal loss + class_weights instead of rebalancing
+        # (rebalancing was too aggressive: 5000 -> 738 samples)
+        # if task.startswith("kg_"):
+        #     _rebalance_dataset(train_ds)
 
         datasets[task] = train_ds
 
@@ -972,9 +994,9 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
               f"{', active mode' if topo_config.get('active_mode', False) else ''}")
 
     # ---- Resume from checkpoint if requested ----
-    skip_a = resume_phase in ("b", "B", "c", "C", "d", "D")
-    skip_b = resume_phase in ("c", "C", "d", "D")
-    skip_c = resume_phase in ("d", "D")
+    skip_a = resume_phase in ("b", "B", "c", "C", "d", "D", "e", "E")
+    skip_b = resume_phase in ("c", "C", "d", "D", "e", "E")
+    skip_c = resume_phase in ("d", "D", "e", "E")
 
     if skip_a:
         last_task = PHASE_A_TASKS[-1]
@@ -1049,6 +1071,7 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
         # structural tasks; DSM contributes nothing (semantic_weight ≈ 0.05).
         # Also freeze params so backward skips them too.
         model.executive_loop.use_dsm = False
+        model.bypass_llm = True  # No text features during structural foundation
         frozen_params = []
         for name, param in model.named_parameters():
             if 'topo_bridge' in name or 'dsm' in name.lower():
@@ -1064,6 +1087,7 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
 
         # Re-enable DSM + unfreeze for subsequent phases
         model.executive_loop.use_dsm = True
+        model.bypass_llm = False  # Re-enable text features
         for name, param in model.named_parameters():
             if 'topo_bridge' in name or 'dsm' in name.lower():
                 param.requires_grad_(True)
@@ -1155,6 +1179,42 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
             for task, acc in phase_d_results.items():
                 all_results[f"phase_d_{task}"] = {"best_val_acc": acc}
 
+    # ---- Phase E: Metacognitive Consolidation ----
+    skip_e = resume_phase not in (None, 'e', 'E')
+    phase_e_cfg = config.get('phase_e', {})
+    if not skip_e and phase_e_cfg:
+        print(f"\n{'=' * 72}")
+        print("Phase E: Metacognitive Consolidation (all tasks mixed)")
+        print(f"{'=' * 72}")
+
+        # Load last Phase D checkpoint if we haven't just run Phase D
+        if resume_phase in ('e', 'E'):
+            last_d_task = PHASE_D_TASKS[-1]
+            ckpt_path = checkpoint_dir / f"phase_d_{last_d_task}.pt"
+            if ckpt_path.exists():
+                state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+                _load_state_filtered(model, state)
+                del state
+                gc.collect()
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                print(f"  Resumed from checkpoint: {ckpt_path}")
+
+        # Ensure DSM/LLM is enabled
+        if hasattr(model, 'executive_loop'):
+            model.executive_loop.use_dsm = True
+
+        # Phase E runs all tasks in a single mixed phase
+        phase_e_results, _ = _run_phase(
+            'e', PHASE_E_TASKS, model, config, device, pregen_dir,
+            train_range, all_topos, checkpoint_dir, use_amp,
+            phase_a_datasets=phase_a_datasets if phase_a_datasets else None,
+            observer=observer,
+            conceptnet_graph=conceptnet_graph if 'conceptnet_graph' in dir() else None,
+        )
+        for task, acc in phase_e_results.items():
+            all_results[f"phase_e_{task}"] = {"best_val_acc": acc}
+
     # ---- Diagnostics ----
     print(f"\n{'=' * 72}")
     print("Final Diagnostics")
@@ -1198,8 +1258,8 @@ if __name__ == "__main__":
     parser.add_argument("config", nargs="?", default="config/dsm_training.yaml")
     parser.add_argument("--pregenerated-dir", default=None,
                         help="Load pre-generated datasets from this directory")
-    parser.add_argument("--resume-phase", default=None, choices=["b", "B", "c", "C", "d", "D"],
-                        help="Skip earlier phases and resume from B, C, or D (loads last checkpoint)")
+    parser.add_argument("--resume-phase", default=None, choices=["b", "B", "c", "C", "d", "D", "e", "E"],
+                        help="Skip earlier phases and resume from B, C, D, or E (loads last checkpoint)")
     args = parser.parse_args()
     run_curriculum(args.config, pregenerated_dir=args.pregenerated_dir,
                    resume_phase=args.resume_phase)

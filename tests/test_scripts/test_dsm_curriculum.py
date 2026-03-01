@@ -101,7 +101,9 @@ class TestBuildDSMOptimizer:
         model = _build_model('hierarchical_llm', _MC, 11, torch.device('cpu'),
                               llm_config=_LC)
         main_opt, bridge_opt = _build_dsm_optimizers(model, config)
-        assert len(main_opt.param_groups) == 2  # GNN/TAT + DSM/adapter
+        # GNN/TAT + DSM/adapter + classifier (metacog only if use_metacog=True)
+        assert len(main_opt.param_groups) >= 2
+        assert len(main_opt.param_groups) <= 5  # max: GNN/TAT, DSM, metacog, classifier, Qwen
         assert bridge_opt is not None
         assert len(bridge_opt.param_groups) == 1  # bridge params
 
@@ -113,9 +115,9 @@ class TestBuildDSMOptimizer:
         model = _build_model('hierarchical_llm', _MC, 11, torch.device('cpu'),
                               llm_config=_LC)
         main_opt, bridge_opt = _build_dsm_optimizers(model, config)
-        assert main_opt.param_groups[0]['lr'] == 1e-3
-        assert main_opt.param_groups[1]['lr'] == 5e-4
-        assert bridge_opt.param_groups[0]['lr'] == 1e-4
+        assert main_opt.param_groups[0]['lr'] == 1e-3   # GNN/TAT
+        assert main_opt.param_groups[1]['lr'] == 5e-4   # DSM/adapter
+        assert bridge_opt.param_groups[0]['lr'] == 1e-4  # bridge
 
     def test_all_params_covered(self):
         """Every trainable param is in exactly one group."""

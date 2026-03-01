@@ -20,6 +20,7 @@ model:
   use_topo_feedback: true
   use_embedding_topo_feedback: true
   use_multi_head_classifier: true
+  use_metacog: true    # Enable MetaCognitiveController
 
 wave:
   wave_mode: ensemble
@@ -64,6 +65,9 @@ training:
   replay_ratio: 0.5
   use_class_weights: false          # disabled — focal loss + class_weights = pathological
   contrastive_loss_weight: 0.0   # was 0.1 — disabled, focal loss handles hard example focus
+  metacog_learning_rate: 0.0005
+  classifier_learning_rate: 0.001
+  epochs_phase_e: 30
 
 topology_observer:
   enabled: true
@@ -101,3 +105,9 @@ phase_d:
   replay_semantic_ratio: 0.1
   semantic_weight_init: 1.0    # override loaded bias (sigmoid≈0.73), KG tasks need semantic features
   resume_from: data/v6_track2/checkpoints/phase_c_labeled_reasoning_best.pt
+
+# Phase E: Metacognitive Consolidation
+phase_e:
+  calibration_loss_weight: 0.1
+  efficiency_loss_weight: 0.01
+  gating_diversity_loss_weight: 0.05
