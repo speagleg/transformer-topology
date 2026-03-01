@@ -23,10 +23,11 @@ class TestMultiHeadClassifier:
         task_classes = {"diverse": 11, "bfs": 16}
         clf = MultiHeadClassifier(input_dim=64, task_classes=task_classes)
         x = torch.randn(1, 64)
-        w_before = clf.heads["diverse"].weight.clone()
+        sd_before = {k: v.clone() for k, v in clf.heads["diverse"].state_dict().items()}
         _ = clf(x, "bfs")
-        w_after = clf.heads["diverse"].weight
-        assert torch.equal(w_before, w_after)
+        sd_after = clf.heads["diverse"].state_dict()
+        for k in sd_before:
+            assert torch.equal(sd_before[k], sd_after[k])
 
     def test_add_task_creates_new_head(self):
         task_classes = {"diverse": 11}
