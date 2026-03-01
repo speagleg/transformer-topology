@@ -84,12 +84,14 @@ class HierarchicalMultiHopModel(nn.Module):
                  use_llm=False, llm_config=None,
                  use_topo_feedback=False,
                  use_embedding_topo_feedback=False,
-                 use_multi_head_classifier=False):
+                 use_multi_head_classifier=False,
+                 use_metacog=False):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.use_llm = use_llm
         self.bypass_llm = False  # Set True to skip TopoBridge entirely (Phase A)
         self.use_multi_head_classifier = use_multi_head_classifier
+        self.use_metacog = use_metacog
         wc = wave_config or {}
 
         # Detect DSM backend: DSM lives inside the executive loop (interleaved
@@ -126,6 +128,8 @@ class HierarchicalMultiHopModel(nn.Module):
             dsm_config=dsm_config,
             use_topo_feedback=use_topo_feedback,
             use_embedding_topo_feedback=use_embedding_topo_feedback,
+            use_metacog=use_metacog,
+            num_tasks=lc.get('num_tasks', 19) if use_metacog else 0,
         )
 
         # Legacy TopoBridge for mock/llama/qwen backends (Phase 4c compat)
@@ -172,7 +176,10 @@ class HierarchicalMultiHopModel(nn.Module):
         # Approach C: text features concatenated to classifier input (query + target + diff)
         text_feat_dim = embedding_dim if (use_llm and backend_type == 'qwen') else 0
         self.text_feat_dim = text_feat_dim
-        classifier_input_dim = base_classifier_dim + 3 * text_feat_dim
+        # Metacog adds strategy_weights(4) + uncertainty(1) to classifier input
+        metacog_dim = 5 if use_metacog else 0
+        self.metacog_dim = metacog_dim
+        classifier_input_dim = base_classifier_dim + 3 * text_feat_dim + metacog_dim
         self.classifier_input_dim = classifier_input_dim
         self.classifier = nn.Sequential(
             nn.Linear(classifier_input_dim, 4 * embedding_dim),
@@ -235,8 +242,16 @@ class HierarchicalMultiHopModel(nn.Module):
         # them (GNN edge_out is gradient-dominated, destroys curl content).
         initial_edge_embs = cc.get_embeddings(1).clone() if cc.num_cells(1) > 0 else None
 
+        # Map task name to integer ID for metacog controller
+        task_id = None
+        if self.use_metacog and task is not None:
+            from src.benchmarks.benchmark_dataset import TASK_REGISTRY
+            task_list = sorted(TASK_REGISTRY.keys())
+            if task in task_list:
+                task_id = task_list.index(task)
+
         output, num_iters, diagnostics = self.executive_loop(
-            cc, topo_features=topo_features,
+            cc, topo_features=topo_features, task_id=task_id,
         )
 
         # Capture semantic features from DSM path (stored in diagnostics by executive_loop)
@@ -281,21 +296,47 @@ class HierarchicalMultiHopModel(nn.Module):
         ).to(dev)
         wave_energy = self._compute_wave_energy(diagnostics).to(dev)
         persistence_features = self._compute_persistence_features(cc).to(dev)
-        combined = torch.cat([query_emb, target_emb, diff_emb,
-                              hodge_features, wave_energy, persistence_features])
 
-        # Approach C: concatenate text features for query/target/diff
-        if text_features is not None and self.text_feat_dim > 0:
-            text_q = text_features[query_node]
-            text_t = text_features[target_node]
-            combined = torch.cat([combined, text_q, text_t, text_q - text_t])
-        elif self.text_feat_dim > 0:
-            combined = torch.cat([combined,
-                                  torch.zeros(3 * self.text_feat_dim, device=dev)])
+        structural = torch.cat([query_emb, target_emb, diff_emb])
+        topological = torch.cat([hodge_features, wave_energy, persistence_features])
+
+        # Get last control signal for metacog gating
+        last_control = diagnostics['control_signals'][-1] if diagnostics.get('control_signals') else None
+
+        if self.use_metacog and last_control is not None and last_control.text_gate is not None:
+            gated_structural = last_control.structure_gate * structural
+            if text_features is not None and self.text_feat_dim > 0:
+                text_q = text_features[query_node]
+                text_t = text_features[target_node]
+                text_combined = torch.cat([text_q, text_t, text_q - text_t])
+                gated_text = last_control.text_gate * text_combined
+            elif self.text_feat_dim > 0:
+                gated_text = torch.zeros(3 * self.text_feat_dim, device=dev)
+            else:
+                gated_text = torch.zeros(0, device=dev)
+
+            combined = torch.cat([
+                gated_structural, topological, gated_text,
+                last_control.strategy_weights,
+                last_control.uncertainty.unsqueeze(0),
+            ])
+        else:
+            # Non-metacog path (original)
+            combined = torch.cat([structural, topological])
+            if text_features is not None and self.text_feat_dim > 0:
+                text_q = text_features[query_node]
+                text_t = text_features[target_node]
+                combined = torch.cat([combined, text_q, text_t, text_q - text_t])
+            elif self.text_feat_dim > 0:
+                combined = torch.cat([combined,
+                                      torch.zeros(3 * self.text_feat_dim, device=dev)])
 
         self._last_combined = combined.detach()
 
-        # Use multi-head classifier if available and task is specified
+        # Store last control for aux loss computation
+        if last_control is not None:
+            self._last_control = last_control
+
         if task is not None and self.multi_head_classifier is not None:
             return self.multi_head_classifier(combined.unsqueeze(0), task).squeeze(0)
         return self.classifier(combined)
