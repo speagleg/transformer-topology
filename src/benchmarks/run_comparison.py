@@ -333,9 +333,10 @@ class HierarchicalMultiHopModel(nn.Module):
 
         self._last_combined = combined.detach()
 
-        # Store last control for aux loss computation
+        # Store last control + iteration count for aux loss computation
         if last_control is not None:
             self._last_control = last_control
+        self._last_num_iters = num_iters
 
         if task is not None and self.multi_head_classifier is not None:
             return self.multi_head_classifier(combined.unsqueeze(0), task).squeeze(0)

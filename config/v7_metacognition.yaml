@@ -43,7 +43,7 @@ training:
   device: auto
   learning_rate: 0.0003        # was 0.001 — gentle fine-tune for pre-trained GNN/TAT
   adapter_learning_rate: 0.001  # was 0.0001 — 10x boost, adapter must learn text features
-  bridge_learning_rate: 0.0001   # was 0.0005 — lowered, bridge was drifting 12x more than GNN/TAT
+  bridge_learning_rate: 0.001    # text_extractor.proj needs fast learning (design doc bug fix #3)
   qwen_learning_rate: 0.00001    # very low LR for fine-tuning frozen Qwen layers
   bridge_max_norm: 1.0           # separate grad clipping for bridge (vs 5.0 for main)
   bridge_accumulation_steps: 8   # bridge steps less frequently (vs 4 for main)

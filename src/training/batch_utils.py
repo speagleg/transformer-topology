@@ -183,9 +183,10 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
 
             model._last_combined = combined.detach()
 
-            # Store last control for aux loss computation
+            # Store last control + iteration count for aux loss computation
             if last_control is not None:
                 model._last_control = last_control
+            model._last_num_iters = num_iters
 
             if task is not None and getattr(model, 'multi_head_classifier', None) is not None:
                 logits = model.multi_head_classifier(combined.unsqueeze(0), task).squeeze(0)
@@ -212,6 +213,8 @@ def train_epoch_batched(
     loss_fn='ce', focal_gamma=2.0,
     bridge_optimizer=None, bridge_max_norm=1.0,
     bridge_accumulation_steps=8,
+    calibration_loss_weight=0.0,
+    efficiency_loss_weight=0.0,
 ):
     """Training epoch with graph-level mini-batching.
 
@@ -304,6 +307,31 @@ def train_epoch_batched(
                 adj = model._last_adjacency.to(sf.device)
                 c_loss = contrastive_fn(sf, adj) * contrastive_weight
                 batch_loss = batch_loss + c_loss
+
+            # Metacognition auxiliary losses
+            if valid_count > 0 and getattr(model, 'use_metacog', False):
+                control = getattr(model, '_last_control', None)
+                if control is not None and control.uncertainty is not None:
+                    from src.training.metacog_losses import (
+                        calibration_loss as _cal_loss, efficiency_loss as _eff_loss,
+                    )
+                    # Calibration: is the last prediction correct?
+                    last_logits, last_answer = results[-1]
+                    is_correct = torch.tensor(
+                        float(last_logits.argmax().item() == last_answer),
+                        device=device,
+                    )
+                    metacog_ctrl = model.executive_loop.gnn_executive.control_head
+                    if calibration_loss_weight > 0:
+                        cal = _cal_loss(
+                            control, is_correct,
+                            metacog_ctrl.confidence_temperature,
+                        )
+                        batch_loss = batch_loss + calibration_loss_weight * cal
+                    if efficiency_loss_weight > 0:
+                        num_iters = getattr(model, '_last_num_iters', 2)
+                        eff = _eff_loss(control, num_iters)
+                        batch_loss = batch_loss + efficiency_loss_weight * eff
 
         if valid_count > 0 and not (torch.isnan(batch_loss) or torch.isinf(batch_loss)):
             batch_loss.backward()

@@ -574,6 +574,11 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
     use_batched = tc.get('use_batched', False)
     batch_size = tc.get('batch_size', 8)
 
+    # Metacognition aux loss weights (from phase_e config or defaults)
+    phase_cfg = config.get(f'phase_{phase_name}', {})
+    cal_loss_wt = phase_cfg.get('calibration_loss_weight', 0.0)
+    eff_loss_wt = phase_cfg.get('efficiency_loss_weight', 0.0)
+
     results = {}
     datasets = {}
 
@@ -775,6 +780,8 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     loss_fn=loss_fn, focal_gamma=focal_gamma,
                     bridge_optimizer=bridge_optimizer,
                     bridge_max_norm=bridge_max_norm,
+                    calibration_loss_weight=cal_loss_wt,
+                    efficiency_loss_weight=eff_loss_wt,
                     bridge_accumulation_steps=bridge_accumulation_steps,
                 )
             elif replay_samples:
@@ -1180,7 +1187,8 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
                 all_results[f"phase_d_{task}"] = {"best_val_acc": acc}
 
     # ---- Phase E: Metacognitive Consolidation ----
-    skip_e = resume_phase not in (None, 'e', 'E')
+    # Phase E runs after D unless resuming at b/c (haven't built KG foundation)
+    skip_e = resume_phase in ("b", "B", "c", "C")
     phase_e_cfg = config.get('phase_e', {})
     if not skip_e and phase_e_cfg:
         print(f"\n{'=' * 72}")
