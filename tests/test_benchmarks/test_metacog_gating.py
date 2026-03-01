@@ -60,3 +60,20 @@ def test_forward_with_metacog():
     cc = _make_cc()
     logits = model(cc, 0, 5, task='bfs')
     assert logits.shape == (16,)  # bfs has 16 classes
+
+
+def test_batched_forward_with_metacog():
+    """_forward_batch batched DSM path should handle metacog gated composition."""
+    from src.training.batch_utils import _forward_batch
+    # Must use backend='dsm' to trigger the batched path (use_dsm=True)
+    model = _make_model(use_metacog=True, use_llm=True, backend='dsm')
+    cc1 = _make_cc(n=10, with_texts=True)
+    cc2 = _make_cc(n=12, with_texts=True)
+    batch = [
+        (cc1, 0, 5, 3, None),
+        (cc2, 1, 6, 7, None),
+    ]
+    results = _forward_batch(model, batch, torch.device('cpu'), task='bfs')
+    assert len(results) == 2
+    for logits, answer in results:
+        assert logits.shape == (16,)  # bfs has 16 classes

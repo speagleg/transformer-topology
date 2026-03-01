@@ -84,9 +84,17 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
         if topo_features is not None:
             topo_features_list = [topo_features] * len(ccs)
 
+        # Map task name to integer ID for metacog
+        task_id = None
+        if getattr(model, 'use_metacog', False) and task is not None:
+            from src.benchmarks.benchmark_dataset import TASK_REGISTRY
+            task_list = sorted(TASK_REGISTRY.keys())
+            task_id = task_list.index(task) if task in task_list else None
+
         # Batched executive loop (GNN per-graph, DSM batched, TAT per-graph)
         loop_results = model.executive_loop.forward_batched(
             ccs, topo_features_list=topo_features_list,
+            task_id=task_id,
         )
 
         # Per-graph classifier
@@ -137,20 +145,47 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
             wave_energy = model._compute_wave_energy(diagnostics).to(dev)
             persistence_features = model._compute_persistence_features(ccs[g]).to(dev)
 
-            combined = torch.cat([query_emb, target_emb, diff_emb,
-                                  hodge_features, wave_energy, persistence_features])
+            structural = torch.cat([query_emb, target_emb, diff_emb])
+            topological = torch.cat([hodge_features, wave_energy, persistence_features])
 
-            # Approach C: concatenate text features for query/target/diff
+            # Get last control for metacog gating
+            last_control = diagnostics.get('control_signals', [None])[-1]
+            use_metacog = getattr(model, 'use_metacog', False)
             text_feat_dim = getattr(model, 'text_feat_dim', 0)
-            if text_features is not None and text_feat_dim > 0:
-                text_q = text_features[queries[g]]
-                text_t = text_features[targets[g]]
-                combined = torch.cat([combined, text_q, text_t, text_q - text_t])
-            elif text_feat_dim > 0:
-                combined = torch.cat([combined,
-                                      torch.zeros(3 * text_feat_dim, device=dev)])
+
+            if use_metacog and last_control is not None and last_control.text_gate is not None:
+                gated_structural = last_control.structure_gate * structural
+                if text_features is not None and text_feat_dim > 0:
+                    text_q = text_features[queries[g]]
+                    text_t = text_features[targets[g]]
+                    text_combined = torch.cat([text_q, text_t, text_q - text_t])
+                    gated_text = last_control.text_gate * text_combined
+                elif text_feat_dim > 0:
+                    gated_text = torch.zeros(3 * text_feat_dim, device=dev)
+                else:
+                    gated_text = torch.zeros(0, device=dev)
+
+                combined = torch.cat([
+                    gated_structural, topological, gated_text,
+                    last_control.strategy_weights,
+                    last_control.uncertainty.unsqueeze(0),
+                ])
+            else:
+                # Non-metacog path (original)
+                combined = torch.cat([structural, topological])
+                if text_features is not None and text_feat_dim > 0:
+                    text_q = text_features[queries[g]]
+                    text_t = text_features[targets[g]]
+                    combined = torch.cat([combined, text_q, text_t, text_q - text_t])
+                elif text_feat_dim > 0:
+                    combined = torch.cat([combined,
+                                          torch.zeros(3 * text_feat_dim, device=dev)])
 
             model._last_combined = combined.detach()
+
+            # Store last control for aux loss computation
+            if last_control is not None:
+                model._last_control = last_control
 
             if task is not None and getattr(model, 'multi_head_classifier', None) is not None:
                 logits = model.multi_head_classifier(combined.unsqueeze(0), task).squeeze(0)
