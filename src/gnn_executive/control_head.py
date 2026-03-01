@@ -18,6 +18,11 @@ class ControlSignal:
         wave_damping: scalar — wave dissipation (positive).
         semantic_weight: scalar — soft weight for DSM attention bias [0,1]. Never penalized.
         filter_weights: (num_filters,) — softmax weights over spectral filter ensemble.
+        text_gate: scalar [0,1] — how much to weight text/semantic features vs structural.
+        structure_gate: scalar [0,1] — how much to weight structural/topological features.
+        uncertainty: scalar [0,1] — temperature-scaled calibrated uncertainty estimate.
+        iteration_budget: scalar > 0 — soft learned iteration limit for executive loop.
+        strategy_weights: (num_strategies,) — softmax over reasoning strategies.
     """
     frequency_gate: torch.Tensor
     spatial_focus: torch.Tensor
@@ -26,6 +31,11 @@ class ControlSignal:
     wave_damping: torch.Tensor
     semantic_weight: torch.Tensor = None
     filter_weights: torch.Tensor = None
+    text_gate: torch.Tensor = None
+    structure_gate: torch.Tensor = None
+    uncertainty: torch.Tensor = None
+    iteration_budget: torch.Tensor = None
+    strategy_weights: torch.Tensor = None
 
 
 class ControlHead(nn.Module):
