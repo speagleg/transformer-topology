@@ -22,10 +22,13 @@ class GNNExecutive(nn.Module):
                  produce_control_signals: bool = False,
                  num_filters: int = 0,
                  use_topo_feedback: bool = False,
-                 use_embedding_topo_feedback: bool = False):
+                 use_embedding_topo_feedback: bool = False,
+                 use_metacog: bool = False,
+                 num_tasks: int = 19):
         super().__init__()
         self.use_higher_order = use_higher_order
         self.produce_control_signals = produce_control_signals
+        self.use_metacog = use_metacog
         self.spatial_gnn = SpatialGNN(
             in_dim=embedding_dim, hidden_dim=hidden_dim,
             out_dim=embedding_dim, num_layers=num_spatial_layers,
@@ -49,12 +52,23 @@ class GNNExecutive(nn.Module):
             )
 
         if produce_control_signals:
-            self.control_head = ControlHead(
-                embedding_dim=embedding_dim, num_freqs=max_freqs,
-                num_filters=num_filters,
-                use_topo_feedback=use_topo_feedback,
-                use_embedding_topo_feedback=use_embedding_topo_feedback,
-            )
+            if use_metacog:
+                from src.gnn_executive.metacognitive_controller import MetaCognitiveController
+                self.control_head = MetaCognitiveController(
+                    embedding_dim=embedding_dim,
+                    num_freqs=max_freqs,
+                    num_filters=num_filters,
+                    num_tasks=num_tasks,
+                    use_topo_feedback=use_topo_feedback,
+                    use_embedding_topo_feedback=use_embedding_topo_feedback,
+                )
+            else:
+                self.control_head = ControlHead(
+                    embedding_dim=embedding_dim, num_freqs=max_freqs,
+                    num_filters=num_filters,
+                    use_topo_feedback=use_topo_feedback,
+                    use_embedding_topo_feedback=use_embedding_topo_feedback,
+                )
 
     def forward(self, cc: CellComplex) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Run dual-path GNN on a cell complex.
@@ -88,15 +102,23 @@ class GNNExecutive(nn.Module):
     def forward_with_control(
         self, cc: CellComplex, harmonic_energy: torch.Tensor | None = None,
         topo_features: torch.Tensor | None = None,
+        task_id: int | None = None,
+        iteration_context: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, ControlSignal]:
         """Run dual-path GNN and produce control signals for the TAT.
 
         Calls the standard forward pass, then feeds the fused node embeddings
-        through the ControlHead to produce a ControlSignal.
+        through the ControlHead (or MetaCognitiveController) to produce a
+        ControlSignal.
 
         Args:
             cc: Cell complex with 0-cell and 1-cell embeddings.
             harmonic_energy: Optional scalar tensor with harmonic component energy.
+            topo_features: Optional topological feedback features.
+            task_id: Integer task index for MetaCognitiveController (ignored when
+                use_metacog is False).
+            iteration_context: (3,) tensor [iter_ratio, prev_confidence, prev_delta]
+                for MetaCognitiveController (ignored when use_metacog is False).
 
         Returns:
             Tuple of (node_embeddings, edge_embeddings, control_signal).
@@ -110,6 +132,16 @@ class GNNExecutive(nn.Module):
                 "forward_with_control() requires produce_control_signals=True"
             )
         fused, edge_out = self.forward(cc)
-        control = self.control_head(fused, harmonic_energy=harmonic_energy,
-                                    topo_features=topo_features)
+        if self.use_metacog:
+            control = self.control_head(
+                fused, task_id=task_id,
+                harmonic_energy=harmonic_energy,
+                topo_features=topo_features,
+                iteration_context=iteration_context,
+            )
+        else:
+            control = self.control_head(
+                fused, harmonic_energy=harmonic_energy,
+                topo_features=topo_features,
+            )
         return fused, edge_out, control
