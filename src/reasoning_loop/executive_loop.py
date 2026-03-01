@@ -53,7 +53,9 @@ class ExecutiveReasoningLoop(nn.Module):
                  use_dsm: bool = False,
                  dsm_config: dict | None = None,
                  use_topo_feedback: bool = False,
-                 use_embedding_topo_feedback: bool = False):
+                 use_embedding_topo_feedback: bool = False,
+                 use_metacog: bool = False,
+                 num_tasks: int = 19):
         super().__init__()
         self.max_iterations = max_iterations
         self.convergence_threshold = convergence_threshold
@@ -107,6 +109,8 @@ class ExecutiveReasoningLoop(nn.Module):
             num_filters=num_filters,
             use_topo_feedback=use_topo_feedback,
             use_embedding_topo_feedback=use_embedding_topo_feedback,
+            use_metacog=use_metacog,
+            num_tasks=num_tasks,
         )
 
         self.tat = TopologyAwareTransformer(
@@ -168,6 +172,7 @@ class ExecutiveReasoningLoop(nn.Module):
 
     def forward(self, cc: CellComplex,
                 topo_features: torch.Tensor | None = None,
+                task_id: int | None = None,
                 ) -> tuple[torch.Tensor, int, dict]:
         """Run the hierarchical executive reasoning loop.
 
@@ -182,6 +187,8 @@ class ExecutiveReasoningLoop(nn.Module):
             cc: Input CellComplex with 0-cells and 1-cells.
             topo_features: Optional 6-feature tensor from TopologyObserver
                 for active topology feedback to ControlHead.
+            task_id: Integer task index for MetaCognitiveController (ignored
+                when use_metacog is False).
 
         Returns:
             Tuple of (final_embeddings, num_iterations, diagnostics).
@@ -210,9 +217,28 @@ class ExecutiveReasoningLoop(nn.Module):
 
             # 1. GNN Executive → embeddings + control signals
             harmonic_energy_input = prev_harmonic_energy.detach()
+
+            # Build iteration context for metacog controller
+            iteration_context = None
+            if getattr(self.gnn_executive, 'use_metacog', False):
+                prev_conf = 0.5
+                prev_delta = 0.0
+                if diagnostics['control_signals']:
+                    last_cs = diagnostics['control_signals'][-1]
+                    if last_cs.uncertainty is not None:
+                        prev_conf = last_cs.uncertainty.item()
+                if diagnostics['convergence_deltas']:
+                    prev_delta = diagnostics['convergence_deltas'][-1]
+                iteration_context = torch.tensor(
+                    [i / max(self.max_iterations, 1), prev_conf, prev_delta],
+                    device=cc.device, dtype=torch.float32,
+                )
+
             gnn_out, edge_out, control = self.gnn_executive.forward_with_control(
                 cc, harmonic_energy=harmonic_energy_input,
                 topo_features=topo_features,
+                task_id=task_id,
+                iteration_context=iteration_context,
             )
             diagnostics['control_signals'].append(control)
 
@@ -275,6 +301,14 @@ class ExecutiveReasoningLoop(nn.Module):
             if delta < self.convergence_threshold:
                 break
 
+            # Soft learned iteration budget (metacog)
+            if (control.iteration_budget is not None
+                    and control.uncertainty is not None
+                    and i > 0):
+                budget_ratio = float(i) / max(float(control.iteration_budget.item()), 1.0)
+                if budget_ratio > 1.5 and control.uncertainty.item() < 0.3:
+                    break
+
             prev_embeddings = current_embeddings
             prev_harmonic_energy = current_harmonic_energy
 
@@ -287,6 +321,7 @@ class ExecutiveReasoningLoop(nn.Module):
     def forward_batched(
         self, ccs: list[CellComplex],
         topo_features_list: list[torch.Tensor] | None = None,
+        task_id: int | None = None,
     ) -> list[tuple[torch.Tensor, int, dict]]:
         """Batched executive loop: process multiple graphs with batched DSM.
 
@@ -300,6 +335,9 @@ class ExecutiveReasoningLoop(nn.Module):
 
         Args:
             ccs: List of B CellComplexes.
+            topo_features_list: Optional list of topo feature tensors per graph.
+            task_id: Integer task index for MetaCognitiveController (ignored
+                when use_metacog is False).
 
         Returns:
             List of (embeddings, num_iters, diagnostics) per graph.
@@ -325,9 +363,28 @@ class ExecutiveReasoningLoop(nn.Module):
             for g in range(B):
                 harmonic_energy = self._compute_harmonic_energy(ccs[g]).detach()
                 topo_feat = topo_features_list[g] if topo_features_list else None
+
+                # Build iteration context for metacog controller
+                iteration_context = None
+                if getattr(self.gnn_executive, 'use_metacog', False):
+                    prev_conf = 0.5
+                    prev_delta = 0.0
+                    if all_diagnostics[g]['control_signals']:
+                        last_cs = all_diagnostics[g]['control_signals'][-1]
+                        if last_cs.uncertainty is not None:
+                            prev_conf = last_cs.uncertainty.item()
+                    if all_diagnostics[g]['convergence_deltas']:
+                        prev_delta = all_diagnostics[g]['convergence_deltas'][-1]
+                    iteration_context = torch.tensor(
+                        [iteration / max(self.max_iterations, 1), prev_conf, prev_delta],
+                        device=ccs[g].device, dtype=torch.float32,
+                    )
+
                 gnn_out, edge_out, control = self.gnn_executive.forward_with_control(
                     ccs[g], harmonic_energy=harmonic_energy,
                     topo_features=topo_feat,
+                    task_id=task_id,
+                    iteration_context=iteration_context,
                 )
                 all_diagnostics[g]['control_signals'].append(control)
 
