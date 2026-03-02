@@ -58,6 +58,71 @@ class TestQwenTextFeatureExtractor:
         out = ext(["hello"], device=torch.device('cpu'))
         assert out.shape == (1, 16)
 
+    def test_precompute(self):
+        ext = QwenTextFeatureExtractor(llm_dim=64, text_feat_dim=32, use_mock=True)
+        new_count = ext.precompute(["dog", "cat", "bird"])
+        assert new_count == 3
+        assert len(ext._cache) == 3
+        # Re-precompute should add no new entries
+        new_count2 = ext.precompute(["dog", "cat", "fish"])
+        assert new_count2 == 1  # only "fish" is new
+        assert len(ext._cache) == 4
+
+    def test_save_load_cache(self, tmp_path):
+        ext = QwenTextFeatureExtractor(llm_dim=64, text_feat_dim=32, use_mock=True)
+        ext.precompute(["dog", "cat", "bird"])
+        cache_path = tmp_path / "cache.pt"
+        ext.save_cache(cache_path)
+        assert cache_path.exists()
+
+        ext2 = QwenTextFeatureExtractor(llm_dim=64, text_feat_dim=32, use_mock=True)
+        loaded = ext2.load_cache(cache_path)
+        assert loaded == 3
+        assert "dog" in ext2._cache
+        # Embeddings should match
+        torch.testing.assert_close(ext._cache["dog"], ext2._cache["dog"])
+
+    def test_build_gpu_cache(self):
+        ext = QwenTextFeatureExtractor(llm_dim=64, text_feat_dim=32, use_mock=True)
+        ext.precompute(["dog", "cat", "bird"])
+        ext.build_gpu_cache(torch.device('cpu'))
+        assert ext._gpu_cache is not None
+        assert ext._gpu_cache.shape == (3, 64)
+        assert ext._concept_to_idx is not None
+        assert len(ext._concept_to_idx) == 3
+
+    def test_gpu_cache_forward_matches_slow(self):
+        ext = QwenTextFeatureExtractor(llm_dim=64, text_feat_dim=32, use_mock=True)
+        dev = torch.device('cpu')
+        concepts = ["dog", "cat", "bird"]
+
+        # Slow path
+        out_slow = ext(concepts, device=dev)
+
+        # Build GPU cache, re-run
+        ext.build_gpu_cache(dev)
+        out_fast = ext(concepts, device=dev)
+        torch.testing.assert_close(out_slow, out_fast)
+
+    def test_gpu_cache_unknown_concept(self):
+        """GPU cache handles concepts not in the pre-computed set."""
+        ext = QwenTextFeatureExtractor(llm_dim=64, text_feat_dim=32, use_mock=True)
+        ext.precompute(["dog", "cat"])
+        ext.build_gpu_cache(torch.device('cpu'))
+        # "bird" is unknown — should fall back to _get_raw_embedding
+        out = ext(["dog", "bird"], device=torch.device('cpu'))
+        assert out.shape == (2, 32)
+
+    def test_clear_cache_clears_gpu(self):
+        ext = QwenTextFeatureExtractor(llm_dim=64, text_feat_dim=32, use_mock=True)
+        ext.precompute(["dog", "cat"])
+        ext.build_gpu_cache(torch.device('cpu'))
+        assert ext._gpu_cache is not None
+        ext.clear_cache()
+        assert ext._gpu_cache is None
+        assert ext._concept_to_idx is None
+        assert len(ext._cache) == 0
+
 
 class TestQwenBridgeAdapter:
     def test_extract_text_features_shape(self):
@@ -142,6 +207,38 @@ class TestApproachCIntegration:
         cc.add_1_cell(nodes[2], nodes[3], torch.randn(dim), "edge")
         cc.add_1_cell(nodes[3], nodes[4], torch.randn(dim), "edge")
         cc.node_texts = ["dog", "cat", "animal", "pet", "bird"]
+
+        logits = model(cc, query_node=0, target_node=2)
+        assert logits.shape == (10,)
+
+    def test_gpu_cache_forward(self):
+        """Model forward pass works with GPU cache enabled."""
+        from src.benchmarks.run_comparison import HierarchicalMultiHopModel
+        from src.cell_complex.cell_complex import CellComplex
+        dim = 32
+        model = HierarchicalMultiHopModel(
+            embedding_dim=dim, gnn_hidden=64,
+            gnn_spatial_layers=2, gnn_spectral_layers=2,
+            max_freqs=16, tat_layers=2,
+            tat_spatial_heads=4, tat_spectral_heads=4,
+            tat_ff_dim=128, max_classes=10,
+            max_iterations=2, convergence_threshold=0.05,
+            use_llm=True,
+            llm_config={'backend': 'qwen', 'llm_dim': 64, 'use_mock': True},
+        )
+        cc = CellComplex(embedding_dim=dim)
+        nodes = [cc.add_0_cell(torch.randn(dim), "concept") for _ in range(5)]
+        cc.add_1_cell(nodes[0], nodes[1], torch.randn(dim), "edge")
+        cc.add_1_cell(nodes[1], nodes[2], torch.randn(dim), "edge")
+        cc.add_1_cell(nodes[2], nodes[3], torch.randn(dim), "edge")
+        cc.add_1_cell(nodes[3], nodes[4], torch.randn(dim), "edge")
+        cc.node_texts = ["dog", "cat", "animal", "pet", "bird"]
+
+        # Build GPU cache before forward
+        text_ext = model.topo_bridge.text_extractor
+        text_ext.precompute(["dog", "cat", "animal", "pet", "bird"])
+        text_ext.build_gpu_cache(torch.device('cpu'))
+        assert text_ext._gpu_cache is not None
 
         logits = model(cc, query_node=0, target_node=2)
         assert logits.shape == (10,)

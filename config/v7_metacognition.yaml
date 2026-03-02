@@ -59,7 +59,7 @@ training:
   epochs_phase_b: 30
   epochs_phase_c: 30
   epochs_phase_d: 40
-  patience: 20                 # was 10 — give adapter warmup time
+  patience: 10                 # was 20 — 10 with pre-computed text features
   max_norm: 5.0
   accumulation_steps: 4
   replay_ratio: 0.5
@@ -87,20 +87,20 @@ benchmark:
   train_topologies: [ba, ws, grid, tree, ladder, sbm]
   test_topologies: [er, caveman]
   checkpoint_dir: data/v6_track2/checkpoints
-  pregen_dir: data/dsm_datasets
+  pregen_dir: data/dsm_datasets_25k
   conceptnet_path: data/conceptnet/conceptnet_en.pkl
 
 # Phase D: KG tasks requiring multi-modal fusion
 phase_d:
   tasks: [kg_relation, kg_concept, kg_pathvalid, kg_analogy, kg_cluster]
   epochs:
-    kg_relation: 25            # was 10 — adapter needs more time
-    kg_concept: 20             # was 8
-    kg_pathvalid: 20           # was 8
-    kg_analogy: 20             # was 8
-    kg_cluster: 15             # was 6
-  kg_train_samples: 5000
-  kg_val_samples: 500
+    kg_relation: 20
+    kg_concept: 20
+    kg_pathvalid: 20
+    kg_analogy: 20
+    kg_cluster: 20
+  kg_train_samples: 25000
+  kg_val_samples: 2000
   replay_structural_ratio: 0.2
   replay_semantic_ratio: 0.1
   semantic_weight_init: 1.0    # override loaded bias (sigmoid≈0.73), KG tasks need semantic features
