@@ -154,6 +154,11 @@ class MetaCognitiveController(nn.Module):
         trunk_input = torch.cat([pooled, harmonic_energy, log_n, topo_feat, task_emb, iter_ctx])
         features = self.trunk(trunk_input)
 
+        # NaN guard: if trunk produces NaN (e.g. from unstable partial-loaded weights),
+        # fall back to zeros so heads produce neutral sigmoid(0)=0.5 outputs
+        if torch.isnan(features).any():
+            features = torch.zeros_like(features)
+
         # === Existing heads ===
         frequency_gate = torch.sigmoid(self.freq_head(features))
         spatial_focus = torch.sigmoid(self.spatial_head(node_embeddings).squeeze(-1))

@@ -48,17 +48,27 @@ PHASE_D_TASKS = ["kg_relation", "kg_concept", "kg_pathvalid", "kg_analogy", "kg_
 PHASE_E_TASKS = sorted(set(PHASE_A_TASKS + PHASE_B_TASKS + PHASE_C_TASKS + PHASE_D_TASKS))
 
 
-def _load_state_filtered(model, state_dict):
+def _load_state_filtered(model, state_dict, skip_prefixes=None):
     """Load state dict, partial-copying keys with shape mismatches (e.g. num_tasks changed).
 
     When checkpoint tensor is smaller than model tensor (e.g. task_embedding grew
     from 14→19 tasks), copies the overlapping region and keeps the model's init
     for the rest. This preserves learned weights instead of discarding them.
+
+    Args:
+        skip_prefixes: Optional list of key prefixes to skip entirely. Keys
+            matching any prefix will NOT be loaded from checkpoint, allowing
+            the model's fresh initialization to be used instead.
     """
     model_state = model.state_dict()
     filtered = {}
     skipped = []
+    prefix_skipped = []
     for k, v in state_dict.items():
+        # Skip keys matching any prefix (e.g. 'control_head' for fresh MetaCognitiveController)
+        if skip_prefixes and any(prefix in k for prefix in skip_prefixes):
+            prefix_skipped.append(k)
+            continue
         if k in model_state and model_state[k].shape != v.shape:
             model_shape = model_state[k].shape
             if len(v.shape) == len(model_shape):
@@ -79,6 +89,12 @@ def _load_state_filtered(model, state_dict):
                 )
             continue
         filtered[k] = v
+    if prefix_skipped:
+        print(f"  Skipped {len(prefix_skipped)} keys by prefix filter (fresh init):")
+        for k in prefix_skipped[:5]:
+            print(f"    {k}")
+        if len(prefix_skipped) > 5:
+            print(f"    ... and {len(prefix_skipped) - 5} more")
     if skipped:
         print(f"  Handled {len(skipped)} size-mismatched keys:")
         for s in skipped:
@@ -1081,12 +1097,17 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
     skip_b = resume_phase in ("c", "C", "d", "D", "e", "E")
     skip_c = resume_phase in ("d", "D", "e", "E")
 
+    # When loading pre-metacog checkpoints (A/B/C) into a metacog-enabled model,
+    # skip old control_head keys so MetaCognitiveController starts fresh.
+    # Partial-copying old [40→64→32] trunk into new [171→256→128] produces NaN.
+    metacog_skip = ['control_head'] if mc.get('use_metacog', False) else None
+
     if skip_a:
         last_task = PHASE_A_TASKS[-1]
         ckpt_path = checkpoint_dir / f"phase_a_{last_task}.pt"
         if ckpt_path.exists():
             state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
-            _load_state_filtered(model, state)
+            _load_state_filtered(model, state, skip_prefixes=metacog_skip)
             del state
             gc.collect()
             if device.type == 'cuda':
@@ -1100,7 +1121,7 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
         ckpt_path = checkpoint_dir / f"phase_b_{last_task}.pt"
         if ckpt_path.exists():
             state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
-            _load_state_filtered(model, state)
+            _load_state_filtered(model, state, skip_prefixes=metacog_skip)
             del state
             gc.collect()
             if device.type == 'cuda':
@@ -1120,7 +1141,7 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
             ckpt_path = checkpoint_dir / f"phase_c_{last_task}.pt"
         if ckpt_path.exists():
             state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
-            _load_state_filtered(model, state)
+            _load_state_filtered(model, state, skip_prefixes=metacog_skip)
             del state
             gc.collect()
             if device.type == 'cuda':
