@@ -163,6 +163,8 @@ def _build_dsm_optimizers(model, config):
             dsm_params.append(param)
         elif 'topo_bridge' in name or 'bridge' in name:
             bridge_params.append(param)
+        elif 'text_reasoning_head' in name or 'text_edge_encoder' in name:
+            classifier_params.append(param)
         else:
             gnn_tat_params.append(param)
 
@@ -1308,6 +1310,16 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
                     torch.cuda.empty_cache()
                 print(f"  Resumed from checkpoint: {ckpt_path}")
 
+        # Load ConceptNet if not already loaded (e.g. --resume-phase e)
+        if 'conceptnet_graph' not in dir() or conceptnet_graph is None:
+            cn_path = bc.get("conceptnet_path", "data/conceptnet/conceptnet_en.pkl")
+            conceptnet_graph = None
+            if Path(cn_path).exists():
+                from src.data.conceptnet import load_cached_graph
+                conceptnet_graph = load_cached_graph(cn_path)
+                print(f"  Loaded ConceptNet: {conceptnet_graph.number_of_nodes():,} nodes, "
+                      f"{conceptnet_graph.number_of_edges():,} edges")
+
         # Ensure DSM/LLM is enabled
         if hasattr(model, 'executive_loop'):
             model.executive_loop.use_dsm = True
@@ -1318,7 +1330,7 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
             train_range, all_topos, checkpoint_dir, use_amp,
             phase_a_datasets=phase_a_datasets if phase_a_datasets else None,
             observer=observer,
-            conceptnet_graph=conceptnet_graph if 'conceptnet_graph' in dir() else None,
+            conceptnet_graph=conceptnet_graph,
         )
         for task, acc in phase_e_results.items():
             all_results[f"phase_e_{task}"] = {"best_val_acc": acc}

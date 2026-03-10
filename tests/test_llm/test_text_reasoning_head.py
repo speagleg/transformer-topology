@@ -138,3 +138,46 @@ def test_batched_forward_with_text_reasoning():
     logits, answer = results[0]
     assert logits.shape == (10,)
     assert answer == 3
+
+
+def test_optimizer_routing_text_modules():
+    """TextReasoningHead and TextEdgeEncoder params route to classifier group."""
+    from src.benchmarks.run_comparison import HierarchicalMultiHopModel
+
+    model = HierarchicalMultiHopModel(
+        embedding_dim=32, gnn_hidden=32, gnn_spatial_layers=2,
+        gnn_spectral_layers=1, max_freqs=8, tat_layers=1,
+        tat_spatial_heads=2, tat_spectral_heads=2, tat_ff_dim=64,
+        max_classes=10, max_iterations=2, convergence_threshold=0.01,
+        use_llm=True, llm_config={'backend': 'qwen', 'use_mock': True},
+        use_metacog=False,
+    )
+
+    # Check that text_reasoning_head params exist and are trainable
+    tr_params = [n for n, p in model.named_parameters()
+                 if 'text_reasoning_head' in n and p.requires_grad]
+    assert len(tr_params) > 0, "TextReasoningHead should have trainable params"
+
+    # Check that text_edge_encoder gate is frozen
+    te_gate = [n for n, p in model.named_parameters()
+               if 'text_edge_encoder' in n and 'gate' in n]
+    assert len(te_gate) == 1
+    gate_param = dict(model.named_parameters())[te_gate[0]]
+    assert not gate_param.requires_grad, "TextEdgeEncoder gate should be frozen in Phase 1"
+
+    # Verify routing: simulate _build_dsm_optimizers logic
+    classifier_routed = []
+    gnn_tat_routed = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if 'text_reasoning_head' in name or 'text_edge_encoder' in name:
+            classifier_routed.append(name)
+        elif 'classifier' not in name and 'topo_bridge' not in name:
+            gnn_tat_routed.append(name)
+
+    # text_reasoning_head params should route to classifier group
+    assert len(classifier_routed) > 0, "Text modules should route to classifier group"
+    # text_edge_encoder MLP params (not gate) should be in classifier group
+    te_mlp = [n for n in classifier_routed if 'text_edge_encoder' in n]
+    assert len(te_mlp) > 0, "TextEdgeEncoder MLP params should route to classifier group"
