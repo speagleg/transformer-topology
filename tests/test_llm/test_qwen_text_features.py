@@ -169,9 +169,11 @@ class TestApproachCIntegration:
             use_llm=True,
             llm_config={'backend': 'qwen', 'llm_dim': 64, 'use_mock': True},
         )
-        # base = 3*32 + 3 + 1 + 32 = 132, text = 3*32 = 96 → total = 228
+        # Dual-path: text injected into node embs + concatenated to classifier
+        # base = 3*32 + 3 + 1 + 32 = 132, text = 3*32 = 96, text_reasoning = 3*64 = 192
         assert model.text_feat_dim == 32
-        assert model.classifier_input_dim == 132 + 96
+        assert model.text_reasoning_dim == 64
+        assert model.classifier_input_dim == 132 + 96 + 192
 
     def test_classifier_input_dim_without_text(self):
         from src.benchmarks.run_comparison import HierarchicalMultiHopModel

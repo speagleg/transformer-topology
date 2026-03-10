@@ -171,15 +171,38 @@ class HierarchicalMultiHopModel(nn.Module):
         else:
             self.topo_bridge = None
 
+        # Learned gate for text injection into node embeddings (init near zero
+        # so pre-trained GNN/TAT weights aren't disrupted at start of training)
+        if use_llm and backend_type == 'qwen':
+            self.text_injection_gate = nn.Parameter(torch.tensor(-3.0))
+        else:
+            self.text_injection_gate = None
+
+        # TextReasoningHead: graph-aware text transformer (v9)
+        text_reasoning_dim = 0
+        if use_llm and backend_type == 'qwen':
+            from src.llm.text_reasoning_head import TextReasoningHead
+            text_reasoning_dim = 64
+            self.text_reasoning_head = TextReasoningHead(
+                input_dim=embedding_dim,  # text_feat_dim == embedding_dim for Qwen
+                hidden_dim=text_reasoning_dim,
+                num_layers=2,
+                num_heads=4,
+            )
+        else:
+            self.text_reasoning_head = None
+        self.text_reasoning_dim = text_reasoning_dim
+
         # hodge(3) + wave_energy(1) + persistence(32)
         base_classifier_dim = 3 * embedding_dim + 3 + 1 + PERSISTENCE_FEATURES
-        # Approach C: text features concatenated to classifier input (query + target + diff)
+        # Dual-path text: (1) inject into node embs for topological processing,
+        # (2) concat to classifier for direct signal + gradient flow to proj layer
         text_feat_dim = embedding_dim if (use_llm and backend_type == 'qwen') else 0
         self.text_feat_dim = text_feat_dim
         # Metacog adds strategy_weights(4) + uncertainty(1) to classifier input
         metacog_dim = 5 if use_metacog else 0
         self.metacog_dim = metacog_dim
-        classifier_input_dim = base_classifier_dim + 3 * text_feat_dim + metacog_dim
+        classifier_input_dim = base_classifier_dim + 3 * text_feat_dim + 3 * text_reasoning_dim + metacog_dim
         self.classifier_input_dim = classifier_input_dim
         self.classifier = nn.Sequential(
             nn.Linear(classifier_input_dim, 4 * embedding_dim),
@@ -250,6 +273,31 @@ class HierarchicalMultiHopModel(nn.Module):
             if task in task_list:
                 task_id = task_list.index(task)
 
+        # Dual-path text features:
+        # Path 1: Inject into node embeddings for topological processing (GNN→wave→TAT)
+        # Path 2: Concat to classifier for direct signal + gradient flow to proj layer
+        text_features = None
+        if self.use_llm and self.topo_bridge is not None and not self.bypass_llm:
+            if hasattr(self.topo_bridge, 'extract_text_features'):
+                node_texts = getattr(cc, 'node_texts', None) or None
+                if node_texts:
+                    text_features = self.topo_bridge.extract_text_features(
+                        node_texts, cc.get_embeddings(0).device,
+                    )
+                    # Path 1: gated injection into node embeddings (forward-only)
+                    # Detach to prevent backward through executive loop (4.5x slowdown)
+                    # Gradients flow through Path 2 (classifier concat) instead
+                    if self.text_injection_gate is not None:
+                        gate = torch.sigmoid(self.text_injection_gate)
+                        node_embs = cc.get_embeddings(0)
+                        cc.set_embeddings(0, (node_embs + gate * text_features).detach())
+
+        # Path 3: Graph-aware text reasoning (v9)
+        text_reasoning_output = None
+        if text_features is not None and self.text_reasoning_head is not None:
+            adj = cc.adjacency_matrix(0)
+            text_reasoning_output = self.text_reasoning_head(text_features, adj)
+
         output, num_iters, diagnostics = self.executive_loop(
             cc, topo_features=topo_features, task_id=task_id,
         )
@@ -259,18 +307,9 @@ class HierarchicalMultiHopModel(nn.Module):
             self._last_semantic_features = diagnostics['semantic_features']
             self._last_adjacency = cc.adjacency_matrix(0)
 
-        # LLM integration
-        text_features = None
+        # Legacy LLM blend (mock/llama backends only — Qwen uses dual-path above)
         if self.use_llm and self.topo_bridge is not None and not self.bypass_llm:
-            if hasattr(self.topo_bridge, 'extract_text_features'):
-                # Approach C (Qwen): per-node text features direct to classifier
-                node_texts = getattr(cc, 'node_texts', None) or None
-                if node_texts:
-                    text_features = self.topo_bridge.extract_text_features(
-                        node_texts, output.device,
-                    )
-            else:
-                # Legacy blend (mock/llama): blend executive output with TopoBridge
+            if not hasattr(self.topo_bridge, 'extract_text_features'):
                 control_signals = diagnostics.get('control_signals', [])
                 if control_signals:
                     semantic_weight = control_signals[-1].semantic_weight
@@ -305,6 +344,7 @@ class HierarchicalMultiHopModel(nn.Module):
 
         if self.use_metacog and last_control is not None and last_control.text_gate is not None:
             gated_structural = last_control.structure_gate * structural
+            # Path 2: text features concat to classifier (direct gradient flow)
             if text_features is not None and self.text_feat_dim > 0:
                 text_q = text_features[query_node]
                 text_t = text_features[target_node]
@@ -315,14 +355,24 @@ class HierarchicalMultiHopModel(nn.Module):
             else:
                 gated_text = torch.zeros(0, device=dev)
 
+            # Text reasoning features (v9)
+            if text_reasoning_output is not None and self.text_reasoning_dim > 0:
+                tr_q = text_reasoning_output[query_node]
+                tr_t = text_reasoning_output[target_node]
+                text_reasoning_combined = torch.cat([tr_q, tr_t, tr_q - tr_t])
+            elif self.text_reasoning_dim > 0:
+                text_reasoning_combined = torch.zeros(3 * self.text_reasoning_dim, device=dev)
+            else:
+                text_reasoning_combined = torch.zeros(0, device=dev)
+
             combined = torch.cat([
-                gated_structural, topological, gated_text,
+                gated_structural, topological, gated_text, text_reasoning_combined,
                 last_control.strategy_weights,
                 last_control.uncertainty.unsqueeze(0),
             ])
         else:
-            # Non-metacog path (original)
             combined = torch.cat([structural, topological])
+            # Path 2: text features concat to classifier (direct gradient flow)
             if text_features is not None and self.text_feat_dim > 0:
                 text_q = text_features[query_node]
                 text_t = text_features[target_node]
@@ -330,6 +380,15 @@ class HierarchicalMultiHopModel(nn.Module):
             elif self.text_feat_dim > 0:
                 combined = torch.cat([combined,
                                       torch.zeros(3 * self.text_feat_dim, device=dev)])
+
+            # Path 3: text reasoning features (v9)
+            if text_reasoning_output is not None and self.text_reasoning_dim > 0:
+                tr_q = text_reasoning_output[query_node]
+                tr_t = text_reasoning_output[target_node]
+                combined = torch.cat([combined, tr_q, tr_t, tr_q - tr_t])
+            elif self.text_reasoning_dim > 0:
+                combined = torch.cat([combined,
+                                      torch.zeros(3 * self.text_reasoning_dim, device=dev)])
 
         self._last_combined = combined.detach()
 

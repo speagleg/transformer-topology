@@ -31,15 +31,15 @@ def _make_cc(n=10, dim=32, with_texts=True):
 
 
 def test_classifier_input_dim_with_metacog():
-    """233 = 132 (base) + 96 (text) + 5 (metacog)."""
+    """425 = 132 (base) + 96 (text) + 192 (text_reasoning) + 5 (metacog)."""
     model = _make_model(use_metacog=True, use_llm=True, backend='qwen')
-    assert model.classifier_input_dim == 233
+    assert model.classifier_input_dim == 425
 
 
 def test_classifier_input_dim_without_metacog():
-    """228 = 132 (base) + 96 (text) + 0 (no metacog)."""
+    """420 = 132 (base) + 96 (text) + 192 (text_reasoning) + 0 (no metacog)."""
     model = _make_model(use_metacog=False, use_llm=True, backend='qwen')
-    assert model.classifier_input_dim == 228
+    assert model.classifier_input_dim == 420
 
 
 def test_classifier_input_dim_no_text():
