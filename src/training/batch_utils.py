@@ -91,6 +91,37 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
             task_list = sorted(TASK_REGISTRY.keys())
             task_id = task_list.index(task) if task in task_list else None
 
+        # Dual-path text: (1) inject into node embs, (2) concat to classifier
+        per_graph_text_features = [None] * len(ccs)
+        if (model.use_llm and model.topo_bridge is not None
+                and not model.bypass_llm
+                and hasattr(model.topo_bridge, 'extract_text_features')):
+            gate_param = getattr(model, 'text_injection_gate', None)
+            gate = torch.sigmoid(gate_param) if gate_param is not None else None
+            for g, cc in enumerate(ccs):
+                node_texts = getattr(cc, 'node_texts', None) or None
+                if node_texts:
+                    text_feats = model.topo_bridge.extract_text_features(
+                        node_texts, device,
+                    )
+                    per_graph_text_features[g] = text_feats
+                    # Path 1: gated injection into node embeddings (forward-only)
+                    # Detach to prevent backward through executive loop
+                    if gate is not None:
+                        node_embs = cc.get_embeddings(0)
+                        cc.set_embeddings(0, (node_embs + gate * text_feats).detach())
+
+        # Path 3: graph-aware text reasoning (v9)
+        per_graph_text_reasoning = [None] * len(ccs)
+        text_reasoning_head = getattr(model, 'text_reasoning_head', None)
+        if text_reasoning_head is not None:
+            for g, cc in enumerate(ccs):
+                if per_graph_text_features[g] is not None:
+                    adj = cc.adjacency_matrix(0)
+                    per_graph_text_reasoning[g] = text_reasoning_head(
+                        per_graph_text_features[g], adj,
+                    )
+
         # Batched executive loop (GNN per-graph, DSM batched, TAT per-graph)
         loop_results = model.executive_loop.forward_batched(
             ccs, topo_features_list=topo_features_list,
@@ -104,35 +135,26 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
                 model._last_semantic_features = diagnostics['semantic_features']
                 model._last_adjacency = ccs[g].adjacency_matrix(0)
 
-            # LLM integration at model level
-            text_features = None
+            # Legacy LLM blend (mock/llama backends only — Qwen uses dual-path above)
             if (model.use_llm and model.topo_bridge is not None
-                    and not model.bypass_llm):
-                if hasattr(model.topo_bridge, 'extract_text_features'):
-                    # Approach C (Qwen): per-node text features direct to classifier
-                    node_texts = getattr(ccs[g], 'node_texts', None) or None
-                    if node_texts:
-                        text_features = model.topo_bridge.extract_text_features(
-                            node_texts, output.device,
-                        )
+                    and not model.bypass_llm
+                    and not hasattr(model.topo_bridge, 'extract_text_features')):
+                control_signals = diagnostics.get('control_signals', [])
+                if control_signals:
+                    semantic_weight = control_signals[-1].semantic_weight
                 else:
-                    # Legacy blend (mock/llama)
-                    control_signals = diagnostics.get('control_signals', [])
-                    if control_signals:
-                        semantic_weight = control_signals[-1].semantic_weight
-                    else:
-                        semantic_weight = torch.tensor(0.0, device=output.device)
-                    task_text = None
-                    if metadatas[g] and 'task_prompt' in metadatas[g]:
-                        task_text = metadatas[g]['task_prompt']
-                    node_texts = getattr(ccs[g], 'node_texts', None) or None
-                    llm_out, _, sem_feat, _ = model.topo_bridge(
-                        output, semantic_weight, task_text, node_texts=node_texts,
-                    )
-                    model._last_semantic_features = sem_feat
-                    model._last_adjacency = ccs[g].adjacency_matrix(0)
-                    output = ((1 - semantic_weight).unsqueeze(-1) * output
-                              + semantic_weight.unsqueeze(-1) * llm_out)
+                    semantic_weight = torch.tensor(0.0, device=output.device)
+                task_text = None
+                if metadatas[g] and 'task_prompt' in metadatas[g]:
+                    task_text = metadatas[g]['task_prompt']
+                node_texts = getattr(ccs[g], 'node_texts', None) or None
+                llm_out, _, sem_feat, _ = model.topo_bridge(
+                    output, semantic_weight, task_text, node_texts=node_texts,
+                )
+                model._last_semantic_features = sem_feat
+                model._last_adjacency = ccs[g].adjacency_matrix(0)
+                output = ((1 - semantic_weight).unsqueeze(-1) * output
+                          + semantic_weight.unsqueeze(-1) * llm_out)
 
             query_emb = output[queries[g]]
             target_emb = output[targets[g]]
@@ -152,9 +174,11 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
             last_control = diagnostics.get('control_signals', [None])[-1]
             use_metacog = getattr(model, 'use_metacog', False)
             text_feat_dim = getattr(model, 'text_feat_dim', 0)
+            text_features = per_graph_text_features[g]
 
             if use_metacog and last_control is not None and last_control.text_gate is not None:
                 gated_structural = last_control.structure_gate * structural
+                # Path 2: text features concat to classifier
                 if text_features is not None and text_feat_dim > 0:
                     text_q = text_features[queries[g]]
                     text_t = text_features[targets[g]]
@@ -165,14 +189,26 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
                 else:
                     gated_text = torch.zeros(0, device=dev)
 
+                # Text reasoning features (v9)
+                text_reasoning_dim = getattr(model, 'text_reasoning_dim', 0)
+                text_reasoning_out = per_graph_text_reasoning[g]
+                if text_reasoning_out is not None and text_reasoning_dim > 0:
+                    tr_q = text_reasoning_out[queries[g]]
+                    tr_t = text_reasoning_out[targets[g]]
+                    text_reasoning_combined = torch.cat([tr_q, tr_t, tr_q - tr_t])
+                elif text_reasoning_dim > 0:
+                    text_reasoning_combined = torch.zeros(3 * text_reasoning_dim, device=dev)
+                else:
+                    text_reasoning_combined = torch.zeros(0, device=dev)
+
                 combined = torch.cat([
-                    gated_structural, topological, gated_text,
+                    gated_structural, topological, gated_text, text_reasoning_combined,
                     last_control.strategy_weights,
                     last_control.uncertainty.unsqueeze(0),
                 ])
             else:
-                # Non-metacog path (original)
                 combined = torch.cat([structural, topological])
+                # Path 2: text features concat to classifier
                 if text_features is not None and text_feat_dim > 0:
                     text_q = text_features[queries[g]]
                     text_t = text_features[targets[g]]
@@ -180,6 +216,17 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
                 elif text_feat_dim > 0:
                     combined = torch.cat([combined,
                                           torch.zeros(3 * text_feat_dim, device=dev)])
+
+                # Path 3: text reasoning features (v9)
+                text_reasoning_dim = getattr(model, 'text_reasoning_dim', 0)
+                text_reasoning_out = per_graph_text_reasoning[g]
+                if text_reasoning_out is not None and text_reasoning_dim > 0:
+                    tr_q = text_reasoning_out[queries[g]]
+                    tr_t = text_reasoning_out[targets[g]]
+                    combined = torch.cat([combined, tr_q, tr_t, tr_q - tr_t])
+                elif text_reasoning_dim > 0:
+                    combined = torch.cat([combined,
+                                          torch.zeros(3 * text_reasoning_dim, device=dev)])
 
             model._last_combined = combined.detach()
 

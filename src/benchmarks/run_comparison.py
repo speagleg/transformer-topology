@@ -193,6 +193,18 @@ class HierarchicalMultiHopModel(nn.Module):
             self.text_reasoning_head = None
         self.text_reasoning_dim = text_reasoning_dim
 
+        # TextEdgeEncoder: text-derived edge features for GNN (Phase 2 prep, gated off)
+        if use_llm and backend_type == 'qwen':
+            from src.llm.text_edge_encoder import TextEdgeEncoder
+            self.text_edge_encoder = TextEdgeEncoder(
+                text_dim=embedding_dim,
+                edge_dim=embedding_dim,
+            )
+            # Phase 1: freeze gate so encoder has no effect
+            self.text_edge_encoder.gate.requires_grad = False
+        else:
+            self.text_edge_encoder = None
+
         # hodge(3) + wave_energy(1) + persistence(32)
         base_classifier_dim = 3 * embedding_dim + 3 + 1 + PERSISTENCE_FEATURES
         # Dual-path text: (1) inject into node embs for topological processing,
