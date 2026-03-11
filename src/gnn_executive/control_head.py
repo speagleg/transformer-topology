@@ -31,6 +31,7 @@ class ControlSignal:
     wave_damping: torch.Tensor
     semantic_weight: torch.Tensor = None
     filter_weights: torch.Tensor = None
+    fusion_weight: torch.Tensor = None
     text_gate: torch.Tensor = None
     structure_gate: torch.Tensor = None
     uncertainty: torch.Tensor = None
@@ -83,6 +84,10 @@ class ControlHead(nn.Module):
         # Initialize bias to -3.0 so sigmoid starts near 0.05, not 0.5.
         # This prevents untrained DSM from corrupting TAT attention at init.
         nn.init.constant_(self.semantic_weight_head.bias, -3.0)
+
+        # Fusion weight: sigmoid scalar gating how much iteration 2 overrides iteration 1
+        self.fusion_weight_head = nn.Linear(embedding_dim, 1)
+        nn.init.zeros_(self.fusion_weight_head.bias)  # sigmoid(0)=0.5
 
         # Filter ensemble weights (only when multi-filter ensemble is active)
         if num_filters > 0:
@@ -151,6 +156,9 @@ class ControlHead(nn.Module):
         # Semantic weight: scalar [0,1] — soft weight for DSM attention bias
         semantic_weight = torch.sigmoid(self.semantic_weight_head(features).squeeze())
 
+        # Fusion weight: scalar [0,1] — gates dual-track iteration 2 influence
+        fusion_weight = torch.sigmoid(self.fusion_weight_head(features).squeeze())
+
         # Filter ensemble weights: softmax over filter paths
         filter_weights = None
         if self.num_filters > 0:
@@ -165,5 +173,6 @@ class ControlHead(nn.Module):
             diffusion_time=diffusion_time,
             wave_damping=wave_damping,
             semantic_weight=semantic_weight,
+            fusion_weight=fusion_weight,
             filter_weights=filter_weights,
         )

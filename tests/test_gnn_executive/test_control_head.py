@@ -56,7 +56,7 @@ class TestControlHead:
         cs = head(node_emb)
         loss = (cs.frequency_gate.sum() + cs.spatial_focus.sum() +
                 cs.confidence_weights.sum() + cs.diffusion_time + cs.wave_damping +
-                cs.semantic_weight)
+                cs.semantic_weight + cs.fusion_weight)
         loss.backward()
         assert node_emb.grad is not None
         assert node_emb.grad.abs().sum() > 0
@@ -84,3 +84,33 @@ class TestControlHead:
             assert torch.isfinite(cs.confidence_weights).all(), f"Non-finite confidence at n={n_nodes}"
             assert torch.isfinite(cs.diffusion_time), f"Non-finite diffusion_time at n={n_nodes}"
             assert torch.isfinite(cs.wave_damping), f"Non-finite wave_damping at n={n_nodes}"
+
+
+class TestControlHeadFusionWeight:
+
+    def test_control_signal_has_fusion_weight(self):
+        head = ControlHead(embedding_dim=32, num_freqs=16, num_filters=4)
+        x = torch.randn(10, 32)
+        signal = head(x)
+        assert hasattr(signal, 'fusion_weight')
+
+    def test_fusion_weight_is_sigmoid(self):
+        head = ControlHead(embedding_dim=32, num_freqs=16, num_filters=4)
+        x = torch.randn(10, 32)
+        signal = head(x)
+        assert signal.fusion_weight is not None
+        assert 0 <= signal.fusion_weight.item() <= 1
+
+    def test_fusion_weight_init_near_half(self):
+        """fusion_weight bias=0 -> sigmoid(0)=0.5"""
+        head = ControlHead(embedding_dim=32, num_freqs=16, num_filters=4)
+        x = torch.randn(10, 32)
+        signal = head(x)
+        assert abs(signal.fusion_weight.item() - 0.5) < 0.15
+
+    def test_fusion_weight_gradient_flows(self):
+        head = ControlHead(embedding_dim=32, num_freqs=16, num_filters=4)
+        x = torch.randn(10, 32)
+        signal = head(x)
+        signal.fusion_weight.backward()
+        assert head.fusion_weight_head.weight.grad is not None

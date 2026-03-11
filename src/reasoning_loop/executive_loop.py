@@ -22,6 +22,8 @@ from src.gnn_executive.control_head import ControlSignal
 from src.tat.transformer import TopologyAwareTransformer
 from src.wave.dynamics import WaveDynamics, SheafWaveDynamics, MultiFilterDynamics
 from src.spectral.decomposition import hodge_decomposition
+from src.reasoning_loop.text_conditioned_gnn import TextConditionedGNN
+from src.reasoning_loop.cross_attention import CrossAttentionBlock
 
 
 class ExecutiveReasoningLoop(nn.Module):
@@ -55,13 +57,15 @@ class ExecutiveReasoningLoop(nn.Module):
                  use_topo_feedback: bool = False,
                  use_embedding_topo_feedback: bool = False,
                  use_metacog: bool = False,
-                 num_tasks: int = 19):
+                 num_tasks: int = 19,
+                 use_dual_track: bool = False):
         super().__init__()
         self.max_iterations = max_iterations
         self.convergence_threshold = convergence_threshold
         self.use_wave_dynamics = use_wave_dynamics
         self.use_structural_features = use_structural_features
         self.embedding_dim = embedding_dim
+        self.use_dual_track = use_dual_track
 
         if use_structural_features:
             self.structural_encoder = StructuralFeatureEncoder(embedding_dim)
@@ -152,6 +156,15 @@ class ExecutiveReasoningLoop(nn.Module):
                 num_prefix=dc.get('num_prefix', 8),
             )
 
+        # Dual-track modules (iteration 2: cross-modal fusion)
+        if use_dual_track:
+            self.text_gnn = TextConditionedGNN(
+                embed_dim=embedding_dim, hidden_dim=embedding_dim, num_layers=2,
+            )
+            self.cross_attn = CrossAttentionBlock(
+                embed_dim=embedding_dim, num_heads=4,
+            )
+
     def _compute_harmonic_energy(self, cc: CellComplex) -> torch.Tensor:
         """Compute harmonic component energy of edge signals for convergence tracking.
 
@@ -170,9 +183,15 @@ class ExecutiveReasoningLoop(nn.Module):
         except (RuntimeError, ValueError):
             return torch.tensor(0.0, device=cc.device)
 
+    def _extract_edge_index(self, cc: CellComplex) -> torch.Tensor:
+        """Extract PyG-compatible edge_index tensor from CellComplex."""
+        return cc.edge_index()
+
     def forward(self, cc: CellComplex,
                 topo_features: torch.Tensor | None = None,
                 task_id: int | None = None,
+                text_embeddings: torch.Tensor | None = None,
+                force_fusion_weight: float | None = None,
                 ) -> tuple[torch.Tensor, int, dict]:
         """Run the hierarchical executive reasoning loop.
 
@@ -202,6 +221,12 @@ class ExecutiveReasoningLoop(nn.Module):
             struct_feat = self.structural_encoder(cc)
             cc.set_embeddings(0, (cc.get_embeddings(0) + struct_feat).detach())
 
+        # ---- Dual-track path: fixed 2-iteration asymmetric loop ----
+        if self.use_dual_track:
+            return self._forward_dual_track(cc, topo_features, task_id,
+                                            text_embeddings, force_fusion_weight)
+
+        # ---- Standard (non-dual-track) path ----
         prev_embeddings = cc.get_embeddings(0)
         prev_harmonic_energy = self._compute_harmonic_energy(cc)
 
@@ -317,6 +342,110 @@ class ExecutiveReasoningLoop(nn.Module):
             diagnostics['semantic_features'] = sem_feat
 
         return current_embeddings, num_iters, diagnostics
+
+    def _forward_dual_track(
+        self,
+        cc: CellComplex,
+        topo_features: torch.Tensor | None,
+        task_id: int | None,
+        text_embeddings: torch.Tensor | None,
+        force_fusion_weight: float | None,
+    ) -> tuple[torch.Tensor, int, dict]:
+        """Dual-track forward: iteration 1 (structural) + iteration 2 (cross-modal fusion).
+
+        Iteration 1: standard GNN + wave + TAT (pure structural)
+        Iteration 2: TextConditionedGNN + CrossAttention + TAT (cross-modal)
+        Final output: (1 - fw) * h_struct + fw * h_fused
+
+        No .detach() between iterations so gradients flow through both tracks.
+        """
+        prev_embeddings = cc.get_embeddings(0)
+        harmonic_energy = self._compute_harmonic_energy(cc).detach()
+
+        diagnostics = {
+            'harmonic_energies': [harmonic_energy.item()],
+            'convergence_deltas': [],
+            'control_signals': [],
+        }
+
+        # === Iteration 1: Structural ===
+        gnn_out, edge_out, control = self.gnn_executive.forward_with_control(
+            cc, harmonic_energy=harmonic_energy,
+            topo_features=topo_features,
+            task_id=task_id,
+        )
+        diagnostics['control_signals'].append(control)
+
+        # Wave dynamics (iteration 1 only)
+        if self.use_wave_dynamics:
+            with torch.amp.autocast('cuda', enabled=False):
+                wave_out = self.wave_dynamics(
+                    cc, gnn_out.float(),
+                    diffusion_time=control.diffusion_time.float(),
+                    wave_damping=control.wave_damping.float(),
+                    filter_weights=(control.filter_weights.float()
+                                    if control.filter_weights is not None else None),
+                )
+            gnn_out = gnn_out + wave_out.to(gnn_out.dtype)
+
+        # NO .detach() here — gradients flow through to iteration 2
+        cc.set_embeddings(0, gnn_out)
+
+        # TAT iteration 1
+        h_struct = self.tat(cc, control_signal=control)
+
+        # Confidence-weighted integration (iteration 1)
+        confidence = control.confidence_weights.unsqueeze(-1)
+        h_struct = confidence * h_struct + (1 - confidence) * gnn_out
+        h_struct = self.norm(h_struct + prev_embeddings)
+
+        # Get fusion_weight
+        if force_fusion_weight is not None:
+            fw = torch.tensor(force_fusion_weight, device=h_struct.device,
+                              dtype=h_struct.dtype)
+        else:
+            fw = control.fusion_weight
+        diagnostics['fusion_weight'] = fw.item() if torch.is_tensor(fw) else fw
+
+        # === Iteration 2: Cross-modal fusion ===
+        if text_embeddings is not None and (not torch.is_tensor(fw) or fw.item() > 0):
+            edge_index = self._extract_edge_index(cc)
+
+            # TextConditionedGNN: structural + text similarity modulation
+            h_text_gnn = self.text_gnn(h_struct, edge_index, text_embeddings)
+
+            # CrossAttention: structural attends to text
+            h_cross = self.cross_attn(h_text_gnn, text_embeddings)
+
+            # Update CC for TAT iteration 2 (no detach for gradient flow)
+            cc.set_embeddings(0, h_cross)
+
+            # TAT iteration 2
+            h_fused = self.tat(cc, control_signal=control)
+
+            # Blend: (1-fw)*structural + fw*fused
+            h_out = (1 - fw) * h_struct + fw * h_fused
+        else:
+            h_out = h_struct
+            diagnostics['fusion_weight'] = 0.0
+
+        # Write final embeddings back
+        cc.set_embeddings(0, h_out.detach())
+
+        # Update edge embeddings with residual blending
+        if edge_out is not None:
+            old_edge = cc.get_embeddings(1)
+            r = self.edge_residual_ratio
+            blended_edge = (1 - r) * edge_out + r * old_edge
+            cc.set_embeddings(1, blended_edge.detach())
+
+        # Harmonic energy after both iterations
+        final_harmonic = self._compute_harmonic_energy(cc)
+        diagnostics['harmonic_energies'].append(final_harmonic.item())
+        delta = abs(final_harmonic.item() - harmonic_energy.item())
+        diagnostics['convergence_deltas'].append(delta)
+
+        return h_out, 2, diagnostics
 
     def forward_batched(
         self, ccs: list[CellComplex],
