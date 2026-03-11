@@ -141,6 +141,7 @@ class TestGradientFlow:
             + ctrl.diffusion_time
             + ctrl.wave_damping
             + ctrl.semantic_weight
+            + ctrl.fusion_weight
         )
         loss.backward()
         # Every parameter in the control head should have a gradient

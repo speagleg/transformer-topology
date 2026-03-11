@@ -1,0 +1,93 @@
+# config/v10_dual_track.yaml
+# v10: Dual-Track Fusion — asymmetric executive loop + redesigned KG tasks
+
+model:
+  embedding_dim: 32
+  gnn_hidden: 64
+  gnn_spatial_layers: 2
+  gnn_spectral_layers: 2
+  max_freqs: 16
+  tat_layers: 2
+  tat_spatial_heads: 4
+  tat_spectral_heads: 4
+  tat_ff_dim: 128
+  max_iterations: 2
+  convergence_threshold: 0.05
+  use_higher_order: true
+  use_topological_pe: true
+  use_structural_features: true
+  use_wave_dynamics: true
+  use_topo_feedback: true
+  use_embedding_topo_feedback: true
+  use_multi_head_classifier: true
+  use_dual_track: true      # v10: asymmetric iterations
+
+wave:
+  wave_mode: ensemble
+  filter_types: [chebyshev, wave_cosine, heat]
+  include_identity: true
+  wave_strength_gate: true
+  use_neural_ode: true
+
+llm:
+  backend: qwen_contextual
+  qwen_model: Qwen/Qwen2.5-3B-Instruct
+  llm_dim: 2048
+  output_dim: 32
+  num_qwen_layers: 4
+  max_tokens_per_concept: 16
+  num_tasks: 23  # 19 original + 4 v10 KG tasks
+  use_mock: false
+
+training:
+  device: auto
+  learning_rate: 0.0003
+  cross_attn_learning_rate: 0.001
+  readout_learning_rate: 0.001
+  weight_decay: 0.01
+  label_smoothing: 0.02
+  loss_fn: focal
+  focal_gamma: 2.0
+  curl_penalty_weight: 0.01
+  curl_penalty_threshold: 0.5
+  scheduler: cosine_warm_restarts
+  scheduler_eta_min: 0.00001
+  batch_size: 8
+  use_batched: true
+  epochs_phase_a: 5
+  patience: 15
+  max_norm: 5.0
+  accumulation_steps: 4
+  replay_ratio: 0.2
+
+topology_observer:
+  enabled: true
+  analyze_every: 5
+  active_mode: true
+
+benchmark:
+  train_samples: 5000
+  val_samples: 500
+  train_n_nodes: 20
+  train_n_nodes_min: 16
+  train_n_nodes_max: 32
+  checkpoint_dir: data/v10_dual_track/checkpoints
+  pregen_dir: data/v10_datasets
+  conceptnet_path: data/conceptnet/conceptnet_en.pkl
+
+phase_a:
+  tasks: [bfs, hodge_class, diverse]
+  freeze_fusion: true
+
+phase_b:
+  tasks: [kg_relation, kg_transitive, kg_consistency, kg_analogy_v10, kg_causal_chain]
+  epochs:
+    kg_relation: 30
+    kg_transitive: 30
+    kg_consistency: 30
+    kg_analogy_v10: 30
+    kg_causal_chain: 30
+  kg_train_samples: 25000
+  kg_val_samples: 2000
+  replay_structural_ratio: 0.2
+  resume_from: data/v6_track2/checkpoints/phase_c_labeled_reasoning_best.pt
