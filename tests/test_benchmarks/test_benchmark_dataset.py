@@ -20,6 +20,7 @@ class TestTaskRegistry:
             "bfs", "dijkstra", "spectral_gap", "hodge_class",
             "graph_completion", "labeled_reasoning", "analogical_transfer",
             "kg_relation", "kg_concept", "kg_pathvalid", "kg_analogy", "kg_cluster",
+            "kg_transitive", "kg_consistency", "kg_analogy_v10", "kg_causal_chain",
         }
         assert set(TASK_REGISTRY.keys()) == expected
 

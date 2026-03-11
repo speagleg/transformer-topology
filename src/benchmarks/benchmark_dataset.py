@@ -36,6 +36,10 @@ from src.benchmarks.conceptnet_tasks import (
     generate_kg_pathvalid_task,
     generate_kg_analogy_task,
     generate_kg_cluster_task,
+    generate_kg_transitive_task,
+    generate_kg_consistency_task,
+    generate_kg_analogy_task_v10,
+    generate_kg_causal_chain_task,
 )
 
 
@@ -242,6 +246,34 @@ def _wrap_kg_cluster(n_nodes, embedding_dim, topologies, **kwargs):
     return generate_kg_cluster_task(G, embedding_dim, min_nodes=n_nodes, max_nodes=n_nodes + 30)
 
 
+def _wrap_kg_transitive(n_nodes, embedding_dim, topologies, **kwargs):
+    G = kwargs.get('conceptnet_graph')
+    if G is None:
+        raise ValueError("kg_transitive requires conceptnet_graph kwarg")
+    return generate_kg_transitive_task(G, embedding_dim, min_nodes=n_nodes, max_nodes=n_nodes + 30)
+
+
+def _wrap_kg_consistency(n_nodes, embedding_dim, topologies, **kwargs):
+    G = kwargs.get('conceptnet_graph')
+    if G is None:
+        raise ValueError("kg_consistency requires conceptnet_graph kwarg")
+    return generate_kg_consistency_task(G, embedding_dim, min_nodes=n_nodes, max_nodes=n_nodes + 30)
+
+
+def _wrap_kg_analogy_v10(n_nodes, embedding_dim, topologies, **kwargs):
+    G = kwargs.get('conceptnet_graph')
+    if G is None:
+        raise ValueError("kg_analogy_v10 requires conceptnet_graph kwarg")
+    return generate_kg_analogy_task_v10(G, embedding_dim, min_nodes=10, max_nodes=30)
+
+
+def _wrap_kg_causal_chain(n_nodes, embedding_dim, topologies, **kwargs):
+    G = kwargs.get('conceptnet_graph')
+    if G is None:
+        raise ValueError("kg_causal_chain requires conceptnet_graph kwarg")
+    return generate_kg_causal_chain_task(G, embedding_dim, min_nodes=n_nodes, max_nodes=n_nodes + 30)
+
+
 # Task registry: task_type -> (generator_wrapper, max_classes, default_kwargs)
 TASK_REGISTRY: dict[str, tuple[callable, int, dict]] = {
     "diverse":            (_wrap_diverse, 11, {"min_hops": 2, "max_hops": 10}),
@@ -264,6 +296,11 @@ TASK_REGISTRY: dict[str, tuple[callable, int, dict]] = {
     "kg_pathvalid":         (_wrap_kg_pathvalid, 2, {}),
     "kg_analogy":           (_wrap_kg_analogy, 3, {}),
     "kg_cluster":           (_wrap_kg_cluster, 6, {}),
+    # v10: New KG reasoning tasks
+    "kg_transitive":        (_wrap_kg_transitive, 5, {}),
+    "kg_consistency":       (_wrap_kg_consistency, 2, {}),
+    "kg_analogy_v10":       (_wrap_kg_analogy_v10, 3, {}),
+    "kg_causal_chain":      (_wrap_kg_causal_chain, 3, {}),
 }
 
 
