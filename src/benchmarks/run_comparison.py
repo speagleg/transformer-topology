@@ -85,13 +85,15 @@ class HierarchicalMultiHopModel(nn.Module):
                  use_topo_feedback=False,
                  use_embedding_topo_feedback=False,
                  use_multi_head_classifier=False,
-                 use_metacog=False):
+                 use_metacog=False,
+                 use_dual_track=False):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.use_llm = use_llm
         self.bypass_llm = False  # Set True to skip TopoBridge entirely (Phase A)
         self.use_multi_head_classifier = use_multi_head_classifier
         self.use_metacog = use_metacog
+        self.use_dual_track = use_dual_track
         wc = wave_config or {}
 
         # Detect DSM backend: DSM lives inside the executive loop (interleaved
@@ -130,10 +132,30 @@ class HierarchicalMultiHopModel(nn.Module):
             use_embedding_topo_feedback=use_embedding_topo_feedback,
             use_metacog=use_metacog,
             num_tasks=lc.get('num_tasks', 19) if use_metacog else 0,
+            use_dual_track=use_dual_track,
         )
 
+        # v10 dual-track: QwenContextualEncoder + AttentionReadout
+        self.qwen_encoder = None
+        self.attention_readout = None
+        if use_llm and backend_type == 'qwen_contextual':
+            from src.llm.qwen_contextual_encoder import QwenContextualEncoder
+            from src.reasoning_loop.attention_readout import AttentionReadout
+            self.qwen_encoder = QwenContextualEncoder(
+                llm_dim=lc.get('llm_dim', 2048),
+                output_dim=embedding_dim,
+                qwen_model=lc.get('qwen_model', 'Qwen/Qwen2.5-3B-Instruct'),
+                num_layers=lc.get('num_qwen_layers', 4),
+                max_tokens_per_concept=lc.get('max_tokens_per_concept', 16),
+                use_mock=lc.get('use_mock', False),
+            )
+            self.attention_readout = AttentionReadout(
+                embed_dim=embedding_dim,
+                num_tasks=lc.get('num_tasks', 23),
+            )
+
         # Legacy TopoBridge for mock/llama/qwen backends (Phase 4c compat)
-        if use_llm and backend_type != 'dsm':
+        if use_llm and backend_type not in ('dsm', 'qwen_contextual'):
             if backend_type == 'qwen':
                 from src.llm.qwen_bridge_adapter import QwenBridgeAdapter
                 self.topo_bridge = QwenBridgeAdapter(lc, embedding_dim)
@@ -205,16 +227,22 @@ class HierarchicalMultiHopModel(nn.Module):
         else:
             self.text_edge_encoder = None
 
-        # hodge(3) + wave_energy(1) + persistence(32)
-        base_classifier_dim = 3 * embedding_dim + 3 + 1 + PERSISTENCE_FEATURES
-        # Dual-path text: (1) inject into node embs for topological processing,
-        # (2) concat to classifier for direct signal + gradient flow to proj layer
-        text_feat_dim = embedding_dim if (use_llm and backend_type == 'qwen') else 0
+        # v10 dual-track: AttentionReadout produces fixed 101-dim classifier input
+        if self.attention_readout is not None:
+            classifier_input_dim = self.attention_readout.output_dim
+            text_feat_dim = 0
+            metacog_dim = 0
+        else:
+            # hodge(3) + wave_energy(1) + persistence(32)
+            base_classifier_dim = 3 * embedding_dim + 3 + 1 + PERSISTENCE_FEATURES
+            # Dual-path text: (1) inject into node embs for topological processing,
+            # (2) concat to classifier for direct signal + gradient flow to proj layer
+            text_feat_dim = embedding_dim if (use_llm and backend_type == 'qwen') else 0
+            # Metacog adds strategy_weights(4) + uncertainty(1) to classifier input
+            metacog_dim = 5 if use_metacog else 0
+            classifier_input_dim = base_classifier_dim + 3 * text_feat_dim + 3 * text_reasoning_dim + metacog_dim
         self.text_feat_dim = text_feat_dim
-        # Metacog adds strategy_weights(4) + uncertainty(1) to classifier input
-        metacog_dim = 5 if use_metacog else 0
         self.metacog_dim = metacog_dim
-        classifier_input_dim = base_classifier_dim + 3 * text_feat_dim + 3 * text_reasoning_dim + metacog_dim
         self.classifier_input_dim = classifier_input_dim
         self.classifier = nn.Sequential(
             nn.Linear(classifier_input_dim, 4 * embedding_dim),
@@ -273,6 +301,11 @@ class HierarchicalMultiHopModel(nn.Module):
 
     def forward(self, cc, query_node, target_node, metadata=None,
                 topo_features=None, task=None):
+        # ---- v10 dual-track path: QwenContextualEncoder → dual-track loop → AttentionReadout ----
+        if self.attention_readout is not None:
+            return self._forward_v10(cc, query_node, target_node, metadata,
+                                     topo_features, task)
+
         # Capture initial edge embeddings before the executive loop overwrites
         # them (GNN edge_out is gradient-dominated, destroys curl content).
         initial_edge_embs = cc.get_embeddings(1).clone() if cc.num_cells(1) > 0 else None
@@ -408,6 +441,59 @@ class HierarchicalMultiHopModel(nn.Module):
         if last_control is not None:
             self._last_control = last_control
         self._last_num_iters = num_iters
+
+        if task is not None and self.multi_head_classifier is not None:
+            return self.multi_head_classifier(combined.unsqueeze(0), task).squeeze(0)
+        return self.classifier(combined)
+
+    def _forward_v10(self, cc, query_node, target_node, metadata=None,
+                     topo_features=None, task=None):
+        """v10 dual-track forward: QwenEncoder → dual-track loop → AttentionReadout."""
+        dev = cc.get_embeddings(0).device
+
+        # Map task name to integer ID
+        task_id = 0
+        if task is not None:
+            from src.benchmarks.benchmark_dataset import TASK_REGISTRY
+            task_list = sorted(TASK_REGISTRY.keys())
+            if task in task_list:
+                task_id = task_list.index(task)
+
+        # Encode node texts via Qwen (or mock)
+        text_embeddings = None
+        if self.qwen_encoder is not None and not self.bypass_llm:
+            node_texts = getattr(cc, 'node_texts', None) or None
+            if node_texts:
+                text_embeddings = self.qwen_encoder(node_texts, dev)
+
+        # Dual-track executive loop (iter 1: structural, iter 2: cross-modal fusion)
+        output, num_iters, diagnostics = self.executive_loop(
+            cc, topo_features=topo_features, task_id=task_id,
+            text_embeddings=text_embeddings,
+        )
+
+        # Store diagnostics for aux loss / logging
+        self._last_num_iters = num_iters
+        control_signals = diagnostics.get('control_signals', [])
+        if control_signals:
+            self._last_control = control_signals[-1]
+
+        # AttentionReadout: task-conditioned attention pooling → classifier input
+        fw_val = diagnostics.get('fusion_weight', None)
+        if fw_val is not None and not isinstance(fw_val, torch.Tensor):
+            fw_val = torch.tensor(fw_val, device=dev)
+        elif fw_val is None:
+            fw_val = torch.tensor(0.0, device=dev)
+        # Always provide topo_features (zeros if None) for fixed classifier input dim
+        if topo_features is None:
+            topo_features = torch.zeros(4, device=dev)
+        combined = self.attention_readout.build_classifier_input(
+            output, query_node, target_node,
+            task_id=task_id,
+            topo_features=topo_features,
+            fusion_weight=fw_val,
+        )
+        self._last_combined = combined.detach()
 
         if task is not None and self.multi_head_classifier is not None:
             return self.multi_head_classifier(combined.unsqueeze(0), task).squeeze(0)

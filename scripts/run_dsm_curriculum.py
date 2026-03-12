@@ -44,6 +44,11 @@ PHASE_B_TASKS = ["graph_completion", "labeled_reasoning"]
 PHASE_C_TASKS = ["analogical_transfer", "graph_completion", "labeled_reasoning"]
 PHASE_D_TASKS = ["kg_relation", "kg_concept", "kg_pathvalid", "kg_analogy", "kg_cluster"]
 
+# v10 dual-track phase task lists (from config override)
+V10_PHASE_A_TASKS = ["bfs", "hodge_class", "diverse"]
+V10_PHASE_B_TASKS = ["kg_relation", "kg_transitive", "kg_consistency",
+                     "kg_analogy_v10", "kg_causal_chain"]
+
 # All tasks for metacognitive consolidation
 PHASE_E_TASKS = sorted(set(PHASE_A_TASKS + PHASE_B_TASKS + PHASE_C_TASKS + PHASE_D_TASKS))
 
@@ -165,6 +170,10 @@ def _build_dsm_optimizers(model, config):
             bridge_params.append(param)
         elif 'text_reasoning_head' in name or 'text_edge_encoder' in name:
             classifier_params.append(param)
+        # v10: cross-attn, text_gnn, qwen_encoder, attention_readout → cross_attn LR
+        elif any(k in name for k in ('cross_attn', 'text_gnn', 'qwen_encoder',
+                                      'attention_readout')):
+            dsm_params.append(param)
         else:
             gnn_tat_params.append(param)
 
@@ -657,8 +666,10 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
 
     epochs_key = f'epochs_phase_{phase_name}'
     num_epochs = tc.get(epochs_key, 30)
-    # Phase D per-task epoch override from config
+    # Per-task epoch override from config (Phase D or Phase B for v10)
     phase_d_epoch_map = config.get('phase_d', {}).get('epochs', {})
+    phase_b_epoch_map = config.get('phase_b', {}).get('epochs', {})
+    per_task_epoch_map = {**phase_d_epoch_map, **phase_b_epoch_map}
     patience = tc.get('patience', 10)
     label_smoothing = tc.get('label_smoothing', 0.1)
     loss_fn = tc.get('loss_fn', 'ce')  # 'ce' or 'focal'
@@ -750,8 +761,8 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
         replay_ratio = tc.get('replay_ratio', 0.0)
         feature_replay = FeatureReplayBuffer() if replay_ratio > 0 else None
 
-        # Per-task epoch count (Phase D tasks may have individual counts)
-        task_epochs = phase_d_epoch_map.get(task, num_epochs)
+        # Per-task epoch count (Phase D/B tasks may have individual counts)
+        task_epochs = per_task_epoch_map.get(task, num_epochs)
 
         # Build separate optimizers for main params and bridge params
         optimizer, bridge_optimizer = _build_dsm_optimizers(model, config)
@@ -961,8 +972,18 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
             if bridge_optimizer is not None:
                 cur_lrs.extend(g['lr'] for g in bridge_optimizer.param_groups)
             lr_str = "/".join(f"{lr:.6f}" for lr in cur_lrs)
+
+            # v10: log fusion_weight
+            fw_str = ""
+            if hasattr(model, 'executive_loop') and hasattr(model.executive_loop, 'gnn_executive'):
+                head = model.executive_loop.gnn_executive.control_head
+                if hasattr(head, 'fusion_weight_head'):
+                    fw_bias = head.fusion_weight_head.bias.data.item()
+                    fw_val = torch.sigmoid(torch.tensor(fw_bias)).item()
+                    fw_str = f" fw={fw_val:.3f}"
+
             print(f"    Ep {epoch:3d} | loss {loss:.4f} | "
-                  f"val {val_acc:.3f} bal {val_bal:.3f} | lr {lr_str} | {elapsed:.0f}s{marker}")
+                  f"val {val_acc:.3f} bal {val_bal:.3f} | lr {lr_str} | {elapsed:.0f}s{fw_str}{marker}")
             scheduler.step()
             if bridge_scheduler is not None:
                 bridge_scheduler.step()
@@ -1075,6 +1096,11 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total params: {total_params:,}, Trainable: {trainable_params:,}")
 
+    # Detect v10 dual-track mode
+    is_v10 = mc.get('use_dual_track', False)
+    if is_v10:
+        print(f"  v10 dual-track mode enabled")
+
     # bf16 autocast causes NaN in spectral/ODE ops — disable until we add
     # per-op exclusions or GradScaler.  fp32 is ~2x slower but actually learns.
     use_amp = False
@@ -1172,32 +1198,70 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
         print("Phase A: Structural Foundation (DSM frozen, GNN/TAT learns)")
         print(f"{'=' * 72}")
 
-        # Disable DSM entirely during Phase A — skip the 205M-param forward
-        # pass (runs 5x per sample in the executive loop).  Phase A is pure
-        # structural tasks; DSM contributes nothing (semantic_weight ≈ 0.05).
-        # Also freeze params so backward skips them too.
-        model.executive_loop.use_dsm = False
-        model.bypass_llm = True  # No text features during structural foundation
-        frozen_params = []
-        for name, param in model.named_parameters():
-            if 'topo_bridge' in name or 'dsm' in name.lower():
-                param.requires_grad_(False)
-                frozen_params.append(name)
-        print(f"  Disabled DSM forward + frozen {len(frozen_params)} param tensors")
+        if is_v10:
+            # v10: freeze cross-attn, text_gnn, qwen_encoder, attention_readout
+            # bypass_llm=True makes _forward_v10 skip Qwen encoding
+            model.bypass_llm = True
+            frozen_params = []
+            for name, param in model.named_parameters():
+                if any(k in name for k in ('cross_attn', 'text_gnn',
+                                            'qwen_encoder', 'attention_readout')):
+                    param.requires_grad_(False)
+                    frozen_params.append(name)
+            # Force fusion_weight=0 so iteration 2 has no effect
+            if hasattr(model.executive_loop, 'gnn_executive'):
+                head = model.executive_loop.gnn_executive.control_head
+                if hasattr(head, 'fusion_weight_head'):
+                    head.fusion_weight_head.bias.data.fill_(-10.0)  # sigmoid(-10)≈0
+                    head.fusion_weight_head.weight.requires_grad_(False)
+                    head.fusion_weight_head.bias.requires_grad_(False)
+            print(f"  v10: Frozen {len(frozen_params)} cross-modal param tensors, fusion_weight→0")
+
+            phase_a_tasks = config.get('phase_a', {}).get('tasks', V10_PHASE_A_TASKS)
+        else:
+            # Disable DSM entirely during Phase A — skip the 205M-param forward
+            # pass (runs 5x per sample in the executive loop).  Phase A is pure
+            # structural tasks; DSM contributes nothing (semantic_weight ≈ 0.05).
+            # Also freeze params so backward skips them too.
+            model.executive_loop.use_dsm = False
+            model.bypass_llm = True  # No text features during structural foundation
+            frozen_params = []
+            for name, param in model.named_parameters():
+                if 'topo_bridge' in name or 'dsm' in name.lower():
+                    param.requires_grad_(False)
+                    frozen_params.append(name)
+            print(f"  Disabled DSM forward + frozen {len(frozen_params)} param tensors")
+            phase_a_tasks = PHASE_A_TASKS
 
         phase_a_results, phase_a_datasets = _run_phase(
-            'a', PHASE_A_TASKS, model, config, device, pregen_dir,
+            'a', phase_a_tasks, model, config, device, pregen_dir,
             train_range, all_topos, checkpoint_dir, use_amp,
             observer=observer,
         )
 
-        # Re-enable DSM + unfreeze for subsequent phases
-        model.executive_loop.use_dsm = True
-        model.bypass_llm = False  # Re-enable text features
-        for name, param in model.named_parameters():
-            if 'topo_bridge' in name or 'dsm' in name.lower():
-                param.requires_grad_(True)
-        print(f"  Re-enabled DSM + unfroze params for Phase B")
+        if is_v10:
+            # Unfreeze cross-modal modules for Phase B
+            model.bypass_llm = False
+            for name, param in model.named_parameters():
+                if any(k in name for k in ('cross_attn', 'text_gnn',
+                                            'qwen_encoder', 'attention_readout')):
+                    param.requires_grad_(True)
+            if hasattr(model.executive_loop, 'gnn_executive'):
+                head = model.executive_loop.gnn_executive.control_head
+                if hasattr(head, 'fusion_weight_head'):
+                    head.fusion_weight_head.bias.data.fill_(0.0)  # sigmoid(0)=0.5
+                    head.fusion_weight_head.weight.requires_grad_(True)
+                    head.fusion_weight_head.bias.requires_grad_(True)
+            print(f"  v10: Unfroze cross-modal modules, fusion_weight→0.5 for Phase B")
+        else:
+            # Re-enable DSM + unfreeze for subsequent phases
+            model.executive_loop.use_dsm = True
+            model.bypass_llm = False  # Re-enable text features
+            for name, param in model.named_parameters():
+                if 'topo_bridge' in name or 'dsm' in name.lower():
+                    param.requires_grad_(True)
+            print(f"  Re-enabled DSM + unfroze params for Phase B")
+
         for task, acc in phase_a_results.items():
             all_results[f"phase_a_{task}"] = {"best_val_acc": acc}
 
@@ -1206,16 +1270,41 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
 
     # ---- Phase B: Semantic Integration ----
     if not skip_b:
-        print(f"\n{'=' * 72}")
-        print("Phase B: Semantic Integration (graph_completion + labeled_reasoning + 20% replay)")
-        print(f"{'=' * 72}")
+        if is_v10:
+            print(f"\n{'=' * 72}")
+            print("Phase B: v10 KG Reasoning (text + structural + 20% replay)")
+            print(f"{'=' * 72}")
 
-        phase_b_results, phase_b_datasets = _run_phase(
-            'b', PHASE_B_TASKS, model, config, device, pregen_dir,
-            train_range, all_topos, checkpoint_dir, use_amp,
-            phase_a_datasets=phase_a_datasets if phase_a_datasets else None,
-            observer=observer,
-        )
+            # Load ConceptNet graph for KG tasks
+            cn_path = bc.get("conceptnet_path", "data/conceptnet/conceptnet_en.pkl")
+            conceptnet_graph = None
+            if Path(cn_path).exists():
+                from src.data.conceptnet import load_cached_graph
+                conceptnet_graph = load_cached_graph(cn_path)
+                print(f"  Loaded ConceptNet: {conceptnet_graph.number_of_nodes():,} nodes, "
+                      f"{conceptnet_graph.number_of_edges():,} edges")
+            else:
+                print(f"  WARNING: ConceptNet not found at {cn_path}")
+
+            phase_b_tasks = config.get('phase_b', {}).get('tasks', V10_PHASE_B_TASKS)
+            phase_b_results, phase_b_datasets = _run_phase(
+                'b', phase_b_tasks, model, config, device, pregen_dir,
+                train_range, all_topos, checkpoint_dir, use_amp,
+                phase_a_datasets=phase_a_datasets if phase_a_datasets else None,
+                observer=observer,
+                conceptnet_graph=conceptnet_graph,
+            )
+        else:
+            print(f"\n{'=' * 72}")
+            print("Phase B: Semantic Integration (graph_completion + labeled_reasoning + 20% replay)")
+            print(f"{'=' * 72}")
+
+            phase_b_results, phase_b_datasets = _run_phase(
+                'b', PHASE_B_TASKS, model, config, device, pregen_dir,
+                train_range, all_topos, checkpoint_dir, use_amp,
+                phase_a_datasets=phase_a_datasets if phase_a_datasets else None,
+                observer=observer,
+            )
         for task, acc in phase_b_results.items():
             all_results[f"phase_b_{task}"] = {"best_val_acc": acc}
 

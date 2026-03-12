@@ -235,3 +235,113 @@ class TestReplayDataset:
         replay = _create_replay_dataset(phase_a_datasets, replay_fraction=0.5,
                                          target_size=3)
         assert len(replay) <= 3
+
+
+_V10_MC = {
+    'embedding_dim': 32, 'gnn_hidden': 64, 'gnn_spatial_layers': 2,
+    'gnn_spectral_layers': 1, 'max_freqs': 8, 'tat_layers': 1,
+    'tat_spatial_heads': 4, 'tat_spectral_heads': 4, 'tat_ff_dim': 64,
+    'use_higher_order': True, 'use_topological_pe': False,
+    'use_structural_features': False, 'max_iterations': 2,
+    'convergence_threshold': 0.05, 'use_dual_track': True,
+    'use_multi_head_classifier': True, 'use_wave_dynamics': False,
+}
+_V10_LC = {
+    'backend': 'qwen_contextual',
+    'llm_dim': 64, 'output_dim': 32,
+    'use_mock': True, 'num_tasks': 23,
+}
+
+
+class TestV10ModelBuild:
+    def test_build_v10_model(self):
+        from src.benchmarks.run_benchmark_suite import _build_model
+        model = _build_model('hierarchical_llm', _V10_MC, 10,
+                              torch.device('cpu'), llm_config=_V10_LC)
+        assert model.qwen_encoder is not None
+        assert model.attention_readout is not None
+        assert model.topo_bridge is None
+        assert model.executive_loop.use_dual_track is True
+        assert model.classifier_input_dim == 101
+
+    def test_v10_forward_pass(self):
+        from src.benchmarks.run_benchmark_suite import _build_model
+        from src.cell_complex.cell_complex import CellComplex
+        model = _build_model('hierarchical_llm', _V10_MC, 16,
+                              torch.device('cpu'), llm_config=_V10_LC)
+        cc = CellComplex(embedding_dim=32)
+        for i in range(10):
+            cc.add_0_cell(torch.randn(32), 'node')
+        for i in range(9):
+            cc.add_1_cell(i, i+1, torch.randn(32), 'edge')
+        cc.node_texts = [f'concept_{i}' for i in range(10)]
+        logits = model(cc, 0, 3, task='bfs')
+        assert logits.shape == (16,)
+
+    def test_v10_gradient_flows(self):
+        from src.benchmarks.run_benchmark_suite import _build_model
+        from src.cell_complex.cell_complex import CellComplex
+        model = _build_model('hierarchical_llm', _V10_MC, 5,
+                              torch.device('cpu'), llm_config=_V10_LC)
+        cc = CellComplex(embedding_dim=32)
+        for i in range(8):
+            cc.add_0_cell(torch.randn(32), 'node')
+        for i in range(7):
+            cc.add_1_cell(i, i+1, torch.randn(32), 'edge')
+        cc.node_texts = [f'n_{i}' for i in range(8)]
+        logits = model(cc.clone(), 0, 3, task='diverse')
+        loss = logits.sum()
+        loss.backward()
+        # Gradients reach Qwen proj
+        assert model.qwen_encoder.proj.weight.grad is not None
+        # Gradients reach GNN
+        gnn_grads = sum(1 for p in model.executive_loop.parameters()
+                        if p.grad is not None)
+        assert gnn_grads > 0
+
+    def test_v10_bypass_llm(self):
+        """bypass_llm=True skips Qwen encoding (Phase A behavior)."""
+        from src.benchmarks.run_benchmark_suite import _build_model
+        from src.cell_complex.cell_complex import CellComplex
+        model = _build_model('hierarchical_llm', _V10_MC, 10,
+                              torch.device('cpu'), llm_config=_V10_LC)
+        model.bypass_llm = True
+        cc = CellComplex(embedding_dim=32)
+        for i in range(10):
+            cc.add_0_cell(torch.randn(32), 'node')
+        for i in range(9):
+            cc.add_1_cell(i, i+1, torch.randn(32), 'edge')
+        cc.node_texts = [f'concept_{i}' for i in range(10)]
+        logits = model(cc, 0, 3, task='bfs')
+        # bfs has 16 classes via multi_head_classifier
+        assert logits.shape == (16,)
+
+
+class TestV10Optimizer:
+    def test_v10_param_groups(self):
+        from scripts.run_dsm_curriculum import _build_dsm_optimizers
+        from src.benchmarks.run_benchmark_suite import _build_model
+        config = {'training': {'learning_rate': 3e-4, 'dsm_learning_rate': 1e-3,
+                                'weight_decay': 0.01}}
+        model = _build_model('hierarchical_llm', _V10_MC, 10,
+                              torch.device('cpu'), llm_config=_V10_LC)
+        main_opt, bridge_opt = _build_dsm_optimizers(model, config)
+        # v10 has no bridge params
+        assert bridge_opt is None
+        # Should have GNN/TAT + cross-attn/Qwen groups
+        assert len(main_opt.param_groups) >= 2
+
+    def test_v10_all_params_covered(self):
+        from scripts.run_dsm_curriculum import _build_dsm_optimizers
+        from src.benchmarks.run_benchmark_suite import _build_model
+        config = {'training': {'learning_rate': 3e-4, 'dsm_learning_rate': 1e-3,
+                                'weight_decay': 0.01}}
+        model = _build_model('hierarchical_llm', _V10_MC, 10,
+                              torch.device('cpu'), llm_config=_V10_LC)
+        main_opt, bridge_opt = _build_dsm_optimizers(model, config)
+        opt_params = set()
+        for group in main_opt.param_groups:
+            for p in group['params']:
+                opt_params.add(id(p))
+        trainable = {id(p) for p in model.parameters() if p.requires_grad}
+        assert opt_params == trainable

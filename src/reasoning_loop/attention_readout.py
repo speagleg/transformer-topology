@@ -21,6 +21,8 @@ class AttentionReadout(nn.Module):
         # Query projection: [task_emb, h_query, h_target] -> readout_query
         self.query_proj = nn.Linear(3 * embed_dim, embed_dim)
         self._scale = math.sqrt(embed_dim)
+        # Default output: h_query(D) + h_target(D) + context(D) + topo(4) + fusion(1)
+        self.output_dim = 3 * embed_dim + 4 + 1
 
     def forward(
         self,
