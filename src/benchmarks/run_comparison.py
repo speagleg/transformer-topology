@@ -460,9 +460,12 @@ class HierarchicalMultiHopModel(nn.Module):
                 task_id = task_list.index(task)
 
         # Encode node texts via Qwen (or mock)
+        # node_texts can come from cc attribute OR metadata dict
         text_embeddings = None
         if self.qwen_encoder is not None and not self.bypass_llm:
             node_texts = getattr(cc, 'node_texts', None) or None
+            if node_texts is None and metadata is not None:
+                node_texts = metadata.get('node_texts', None)
             if node_texts:
                 text_embeddings = self.qwen_encoder(node_texts, dev)
 

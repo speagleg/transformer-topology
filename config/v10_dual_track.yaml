@@ -48,6 +48,7 @@ training:
   label_smoothing: 0.02
   loss_fn: focal
   focal_gamma: 2.0
+  use_class_weights: true
   curl_penalty_weight: 0.01
   curl_penalty_threshold: 0.5
   scheduler: cosine_warm_restarts

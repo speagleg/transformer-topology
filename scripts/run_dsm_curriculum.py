@@ -139,6 +139,7 @@ def _build_dsm_optimizers(model, config):
     qwen_llm_params = []
     metacog_params = []
     classifier_params = []
+    cross_modal_params = []
 
     # Collect unfrozen Qwen LLM layer param IDs for exclusion
     qwen_llm_ids = set()
@@ -170,10 +171,10 @@ def _build_dsm_optimizers(model, config):
             bridge_params.append(param)
         elif 'text_reasoning_head' in name or 'text_edge_encoder' in name:
             classifier_params.append(param)
-        # v10: cross-attn, text_gnn, qwen_encoder, attention_readout → cross_attn LR
+        # v10: cross-attn, text_gnn, qwen_encoder, attention_readout → dedicated group
         elif any(k in name for k in ('cross_attn', 'text_gnn', 'qwen_encoder',
                                       'attention_readout')):
-            dsm_params.append(param)
+            cross_modal_params.append(param)
         else:
             gnn_tat_params.append(param)
 
@@ -196,6 +197,11 @@ def _build_dsm_optimizers(model, config):
         classifier_lr = tc.get('classifier_learning_rate', tc['learning_rate'])
         main_groups.append({'params': classifier_params, 'lr': classifier_lr})
         print(f"  Optimizer: {len(classifier_params)} classifier params at lr={classifier_lr}")
+    # v10: cross-modal params (cross_attn, text_gnn, qwen_encoder proj, attention_readout)
+    if cross_modal_params:
+        cross_modal_lr = tc.get('cross_attn_learning_rate', semantic_lr)
+        main_groups.append({'params': cross_modal_params, 'lr': cross_modal_lr})
+        print(f"  Optimizer: {len(cross_modal_params)} cross-modal params at lr={cross_modal_lr}")
     # Add Qwen LLM fine-tune group if any layers are unfrozen
     if qwen_llm_params:
         qwen_lr = tc.get('qwen_learning_rate', 1e-5)
