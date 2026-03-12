@@ -46,9 +46,9 @@ training:
   readout_learning_rate: 0.001
   weight_decay: 0.01
   label_smoothing: 0.02
-  loss_fn: focal
+  loss_fn: ce
   focal_gamma: 2.0
-  use_class_weights: false  # focal + class_weights = pathological
+  use_class_weights: true  # CE + class_weights is fine (focal + class_weights is pathological)
   curl_penalty_weight: 0.01
   curl_penalty_threshold: 0.5
   scheduler: cosine_warm_restarts
