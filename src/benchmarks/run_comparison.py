@@ -484,9 +484,16 @@ class HierarchicalMultiHopModel(nn.Module):
             fw_val = torch.tensor(fw_val, device=dev)
         elif fw_val is None:
             fw_val = torch.tensor(0.0, device=dev)
+        fw_val = fw_val.to(dev)
         # Always provide topo_features (zeros if None) for fixed classifier input dim
         if topo_features is None:
             topo_features = torch.zeros(4, device=dev)
+        topo_features = topo_features.to(dev)
+        # Truncate/pad to exactly 4 dims to match classifier input_dim
+        if topo_features.shape[0] > 4:
+            topo_features = topo_features[:4]
+        elif topo_features.shape[0] < 4:
+            topo_features = torch.cat([topo_features, torch.zeros(4 - topo_features.shape[0], device=dev)])
         combined = self.attention_readout.build_classifier_input(
             output, query_node, target_node,
             task_id=task_id,
