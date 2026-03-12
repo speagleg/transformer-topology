@@ -1,4 +1,4 @@
-"""Qwen 2.5 contextual encoder: frozen embed_tokens + 4 transformer layers + learned projection.
+"""Qwen 2.5 contextual encoder: frozen Qwen model (truncated) + learned projection.
 
 Caches raw LLM-dim vectors per concept. Projection applied at forward time for gradient flow.
 """
@@ -15,7 +15,8 @@ class QwenContextualEncoder(nn.Module):
     """Encodes concept strings via frozen Qwen layers + learned projection.
 
     In mock mode, uses deterministic hash-based embeddings for testing.
-    In real mode, loads Qwen embed_tokens + first N transformer layers (frozen).
+    In real mode, loads truncated Qwen model (first N layers, frozen)
+    and uses its own forward method for compatibility across transformers versions.
     """
 
     def __init__(
@@ -45,38 +46,33 @@ class QwenContextualEncoder(nn.Module):
 
         # Load real Qwen components if not mock
         self._tokenizer = None
-        self._embed_tokens = None
-        self._layers = None
-        self._layer_norm = None
+        self._qwen_model = None  # truncated Qwen model (not LM head)
         if not use_mock:
             self._load_qwen(qwen_model)
 
     def _load_qwen(self, model_name: str) -> None:
-        """Load frozen Qwen embed_tokens + first N transformer layers."""
+        """Load frozen, truncated Qwen model (first N layers only)."""
         try:
             from transformers import AutoTokenizer, AutoModelForCausalLM
         except ImportError:
             raise ImportError("transformers required for real Qwen mode")
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(
+        full_model = AutoModelForCausalLM.from_pretrained(
             model_name, torch_dtype=torch.float16, trust_remote_code=True,
         )
-        self._embed_tokens = model.model.embed_tokens
-        self._layers = nn.ModuleList(list(model.model.layers[:self.num_layers]))
-        self._layer_norm = model.model.norm
 
-        # Freeze all Qwen parameters
-        for p in self._embed_tokens.parameters():
-            p.requires_grad = False
-        for layer in self._layers:
-            for p in layer.parameters():
-                p.requires_grad = False
-        for p in self._layer_norm.parameters():
+        # Keep only the base model (not LM head), truncate layers
+        self._qwen_model = full_model.model
+        # Remove layers beyond num_layers to save VRAM
+        self._qwen_model.layers = self._qwen_model.layers[:self.num_layers]
+
+        # Freeze everything
+        for p in self._qwen_model.parameters():
             p.requires_grad = False
 
-        # Free the rest of the model
-        del model
+        # Free the LM head and reference
+        del full_model
 
     def _mock_embed(self, text: str) -> torch.Tensor:
         """Deterministic hash-based embedding for testing."""
@@ -117,24 +113,22 @@ class QwenContextualEncoder(nn.Module):
 
     @torch.no_grad()
     def _qwen_encode(self, texts: list[str], device: torch.device) -> torch.Tensor:
-        """Run texts through frozen Qwen layers."""
+        """Run texts through frozen truncated Qwen model."""
         tokens = self._tokenizer(
             texts, return_tensors="pt", padding=True,
             truncation=True, max_length=self.max_tokens,
         ).to(device)
 
-        hidden = self._embed_tokens(tokens.input_ids)
-        mask = tokens.attention_mask
-
-        for layer in self._layers:
-            out = layer(hidden, attention_mask=mask)
-            hidden = out[0]
-
-        hidden = self._layer_norm(hidden)
+        # Use the model's own forward — handles rotary embeddings, masks, etc.
+        out = self._qwen_model(
+            input_ids=tokens.input_ids,
+            attention_mask=tokens.attention_mask,
+        )
+        hidden = out.last_hidden_state  # (batch, seq, llm_dim)
 
         # Mean pool over non-padding tokens
-        mask_expanded = mask.unsqueeze(-1).float()
-        pooled = (hidden * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1)
+        mask = tokens.attention_mask.unsqueeze(-1).float()
+        pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
         return pooled.float()
 
     def forward(
