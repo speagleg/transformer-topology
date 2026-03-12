@@ -365,7 +365,10 @@ def conceptnet_subgraph_to_cc(
     # Store concept texts as metadata
     cc.node_texts = [concept_to_text(c) for c in node_list if c in sub]
 
-    # Add 1-cells (edges) with structural embeddings
+    # Add 1-cells (edges) with structural + relation-type embeddings
+    rel_to_idx = {r: i for i, r in enumerate(RELATION_CATEGORIES)}
+    n_rels = len(RELATION_CATEGORIES)
+
     edge_relations: list[str] = []
     for u, v, data in sub.edges(data=True):
         if u not in node_map or v not in node_map:
@@ -375,6 +378,11 @@ def conceptnet_subgraph_to_cc(
 
         emb = torch.randn(embedding_dim) * 0.01
         emb[0] = weight / 10.0  # normalized weight
+        # One-hot relation type in dims 1..n_rels
+        rel_idx = rel_to_idx.get(relation, rel_to_idx["Other"])
+        if 1 + rel_idx < embedding_dim:
+            emb[1:min(1 + n_rels, embedding_dim)] = 0.0
+            emb[1 + rel_idx] = 1.0
         cc.add_1_cell(node_map[u], node_map[v], emb, relation)
         edge_relations.append(relation)
 
