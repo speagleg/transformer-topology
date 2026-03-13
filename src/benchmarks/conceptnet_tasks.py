@@ -523,6 +523,28 @@ def _build_node_texts(sub: nx.Graph, node_list: list[str]) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+def _get_relation_index(G: nx.Graph) -> dict[str, list[tuple[str, str]]]:
+    """Build category → [(u, v), ...] index for balanced relation sampling.
+
+    Cached on the graph object as ``_relation_index`` to avoid re-scanning.
+    """
+    if hasattr(G, '_relation_index'):
+        return G._relation_index  # type: ignore[attr-defined]
+
+    index: dict[str, list[tuple[str, str]]] = {cat: [] for cat in RELATION_CLASSES}
+    for u, v, data in G.edges(data=True):
+        raw_rel = data.get("relation", data.get("raw_relation", "RelatedTo"))
+        cat = categorize_relation(raw_rel)
+        if cat in index:
+            index[cat].append((u, v))
+
+    # Remove empty categories
+    index = {k: v for k, v in index.items() if v}
+
+    G._relation_index = index  # type: ignore[attr-defined]
+    return index
+
+
 def generate_kg_relation_task(
     G: nx.Graph,
     embedding_dim: int,
@@ -530,6 +552,10 @@ def generate_kg_relation_task(
     max_nodes: int = 50,
 ) -> tuple:
     """Predict the relation category of a random edge.
+
+    Uses balanced sampling: picks a target relation category uniformly,
+    then seeds the subgraph around an edge of that type. This prevents
+    ConceptNet's natural bias (86%+ RelatedTo) from dominating the dataset.
 
     Args:
         G: Full (or partial) ConceptNet graph.
@@ -541,13 +567,50 @@ def generate_kg_relation_task(
         ``(cc, query_node_idx, target_node_idx, answer, metadata)`` where
         *answer* is an index into :data:`RELATION_CLASSES` (0--9).
     """
-    sub, node_list = _safe_extract(G, min_nodes, max_nodes)
+    rel_index = _get_relation_index(G)
+    available_cats = list(rel_index.keys())
+    if not available_cats:
+        raise ValueError("No relation categories found in graph")
 
-    # Pick a random edge
-    edges = list(sub.edges(data=True))
-    if not edges:
-        raise ValueError("Subgraph has no edges")
-    u, v, data = random.choice(edges)
+    # Pick a target category uniformly from available categories
+    target_category = random.choice(available_cats)
+
+    # Pick a random edge of that category from the full graph
+    u_seed, v_seed = random.choice(rel_index[target_category])
+
+    # Build subgraph seeded from one of the edge's endpoints
+    seed_node = random.choice([u_seed, v_seed])
+    u, v = None, None
+    for _ in range(_MAX_RETRIES):
+        try:
+            sub, node_list = extract_subgraph(
+                G, seed=seed_node, min_nodes=min_nodes, max_nodes=max_nodes,
+            )
+        except (ValueError, IndexError):
+            # Seed node might have too few neighbors — pick a new edge
+            u_seed, v_seed = random.choice(rel_index[target_category])
+            seed_node = random.choice([u_seed, v_seed])
+            continue
+
+        # Find an edge of the target category in this subgraph
+        matching = [
+            (eu, ev, d) for eu, ev, d in sub.edges(data=True)
+            if categorize_relation(d.get("relation", d.get("raw_relation", "RelatedTo"))) == target_category
+        ]
+        if matching:
+            u, v, data = random.choice(matching)
+            break
+        # Subgraph didn't contain target category — retry with new seed edge
+        u_seed, v_seed = random.choice(rel_index[target_category])
+        seed_node = random.choice([u_seed, v_seed])
+
+    # Fallback: if we never found a match, use _safe_extract with any edge
+    if u is None:
+        sub, node_list = _safe_extract(G, min_nodes, max_nodes)
+        edges = list(sub.edges(data=True))
+        if not edges:
+            raise ValueError("Subgraph has no edges")
+        u, v, data = random.choice(edges)
 
     raw_rel = data.get("relation", data.get("raw_relation", "RelatedTo"))
     category = categorize_relation(raw_rel)
@@ -1032,50 +1095,62 @@ def generate_kg_transitive_task(
     min_nodes: int = 20,
     max_nodes: int = 50,
 ) -> tuple | None:
-    """Generate transitive inference task.
+    """Generate transitive inference task with balanced class sampling.
 
-    Finds A->B->C chain with labeled relations, asks whether A->C holds
-    transitively. Answer is the transitive relation class, or 'none'.
+    Picks a target class first (uniform over TRANSITIVE_CLASSES), then
+    searches for a matching 2-hop chain. This prevents "none" from
+    dominating the dataset.
     """
-    sub, node_list = _safe_extract(G, min_nodes, max_nodes)
+    target_class = random.choice(TRANSITIVE_CLASSES)
 
-    # Find a 2-hop path A->B->C with labeled relations
-    nodes = list(sub.nodes())
-    random.shuffle(nodes)
-    for a in nodes:
-        for b in (sub.successors(a) if sub.is_directed() else sub.neighbors(a)):
-            rel_ab = sub[a][b].get('relation', '')
-            successors_b = sub.successors(b) if sub.is_directed() else sub.neighbors(b)
-            for c in successors_b:
-                if c == a:
-                    continue
-                rel_bc = sub[b][c].get('relation', '')
+    for _ in range(_MAX_RETRIES):
+        sub, node_list = _safe_extract(G, min_nodes, max_nodes)
 
-                # Determine if transitive
-                if rel_ab == rel_bc and rel_ab in _TRANSITIVE_RELATIONS:
-                    answer_str = rel_ab
-                else:
-                    answer_str = "none"
+        # Collect all 2-hop chains and classify them
+        chains: list[tuple[str, str, str, str, str, str]] = []  # (a, b, c, rel_ab, rel_bc, class)
+        nodes = list(sub.nodes())
+        random.shuffle(nodes)
+        for a in nodes:
+            for b in (sub.successors(a) if sub.is_directed() else sub.neighbors(a)):
+                rel_ab = sub[a][b].get('relation', '')
+                successors_b = sub.successors(b) if sub.is_directed() else sub.neighbors(b)
+                for c in successors_b:
+                    if c == a:
+                        continue
+                    rel_bc = sub[b][c].get('relation', '')
+                    if rel_ab == rel_bc and rel_ab in _TRANSITIVE_RELATIONS:
+                        cls = rel_ab if rel_ab in TRANSITIVE_CLASSES else "none"
+                    else:
+                        cls = "none"
+                    chains.append((a, b, c, rel_ab, rel_bc, cls))
 
-                if answer_str not in TRANSITIVE_CLASSES:
-                    answer_str = "none"
-                answer = TRANSITIVE_CLASSES.index(answer_str)
+        if not chains:
+            continue
 
-                cc, node_map, _ = conceptnet_subgraph_to_cc(sub, embedding_dim, node_list)
-                query_idx = node_map[a]
-                target_idx = node_map[c]
+        # Filter for target class
+        matching = [ch for ch in chains if ch[5] == target_class]
+        if not matching:
+            # Accept any chain from this subgraph
+            matching = chains
 
-                node_texts = _build_node_texts(sub, node_list)
+        a, b, c, rel_ab, rel_bc, answer_str = random.choice(matching)
+        answer = TRANSITIVE_CLASSES.index(answer_str)
 
-                meta = {
-                    'task_type': 'kg_transitive',
-                    'node_texts': node_texts,
-                    'chain': [a, b, c],
-                    'relations': [rel_ab, rel_bc],
-                    'answer_str': answer_str,
-                    'num_classes': len(TRANSITIVE_CLASSES),
-                }
-                return cc, query_idx, target_idx, answer, meta
+        cc, node_map, _ = conceptnet_subgraph_to_cc(sub, embedding_dim, node_list)
+        query_idx = node_map[a]
+        target_idx = node_map[c]
+
+        node_texts = _build_node_texts(sub, node_list)
+
+        meta = {
+            'task_type': 'kg_transitive',
+            'node_texts': node_texts,
+            'chain': [a, b, c],
+            'relations': [rel_ab, rel_bc],
+            'answer_str': answer_str,
+            'num_classes': len(TRANSITIVE_CLASSES),
+        }
+        return cc, query_idx, target_idx, answer, meta
 
     return None
 
@@ -1294,56 +1369,69 @@ def generate_kg_causal_chain_task(
     min_nodes: int = 20,
     max_nodes: int = 50,
 ) -> tuple | None:
-    """Generate causal chain coherence task.
+    """Generate causal chain coherence task with balanced class sampling.
 
-    Finds a chain of 2-3 causal edges, then classifies:
-    - coherent: chain has consistent causal relations
-    - broken: one link is a non-causal relation (structural disruption)
-    - incoherent: chain has mixed/conflicting relation types
+    Picks a target class first (uniform over CAUSAL_CHAIN_CLASSES), then
+    searches for a matching chain. This prevents "incoherent" from
+    dominating the dataset.
     """
-    sub, node_list = _safe_extract(G, min_nodes, max_nodes)
-    nodes = list(sub.nodes())
-    random.shuffle(nodes)
+    target_class = random.choice(CAUSAL_CHAIN_CLASSES)
 
-    for a in nodes:
-        neighbors_a = list(sub.successors(a) if sub.is_directed() else sub.neighbors(a))
-        for b in neighbors_a:
-            rel_ab = sub[a][b].get('relation', '')
-            successors_b = list(sub.successors(b) if sub.is_directed() else sub.neighbors(b))
-            for c in successors_b:
-                if c == a:
-                    continue
-                rel_bc = sub[b][c].get('relation', '')
+    for _ in range(_MAX_RETRIES):
+        sub, node_list = _safe_extract(G, min_nodes, max_nodes)
+        nodes = list(sub.nodes())
+        random.shuffle(nodes)
 
-                # Classify the chain
-                ab_causal = rel_ab in _CAUSAL_RELATIONS
-                bc_causal = rel_bc in _CAUSAL_RELATIONS
+        # Collect all 2-hop chains and classify them
+        chains: list[tuple[str, str, str, str, str, str]] = []
+        for a in nodes:
+            neighbors_a = list(sub.successors(a) if sub.is_directed() else sub.neighbors(a))
+            for b in neighbors_a:
+                rel_ab = sub[a][b].get('relation', '')
+                successors_b = list(sub.successors(b) if sub.is_directed() else sub.neighbors(b))
+                for c in successors_b:
+                    if c == a:
+                        continue
+                    rel_bc = sub[b][c].get('relation', '')
 
-                if ab_causal and bc_causal and rel_ab == rel_bc:
-                    class_name = "coherent"
-                elif ab_causal and bc_causal and rel_ab != rel_bc:
-                    class_name = "incoherent"
-                elif ab_causal != bc_causal:
-                    class_name = "broken"
-                else:
-                    class_name = "incoherent"
+                    ab_causal = rel_ab in _CAUSAL_RELATIONS
+                    bc_causal = rel_bc in _CAUSAL_RELATIONS
 
-                answer = CAUSAL_CHAIN_CLASSES.index(class_name)
+                    if ab_causal and bc_causal and rel_ab == rel_bc:
+                        class_name = "coherent"
+                    elif ab_causal and bc_causal and rel_ab != rel_bc:
+                        class_name = "incoherent"
+                    elif ab_causal != bc_causal:
+                        class_name = "broken"
+                    else:
+                        class_name = "incoherent"
 
-                cc, node_map, _ = conceptnet_subgraph_to_cc(sub, embedding_dim, node_list)
-                query_idx = node_map[a]
-                target_idx = node_map[c]
+                    chains.append((a, b, c, rel_ab, rel_bc, class_name))
 
-                node_texts = _build_node_texts(sub, node_list)
+        if not chains:
+            continue
 
-                meta = {
-                    'task_type': 'kg_causal_chain',
-                    'node_texts': node_texts,
-                    'chain': [a, b, c],
-                    'relations': [rel_ab, rel_bc],
-                    'class_name': class_name,
-                    'num_classes': len(CAUSAL_CHAIN_CLASSES),
-                }
-                return cc, query_idx, target_idx, answer, meta
+        matching = [ch for ch in chains if ch[5] == target_class]
+        if not matching:
+            matching = chains
+
+        a, b, c, rel_ab, rel_bc, class_name = random.choice(matching)
+        answer = CAUSAL_CHAIN_CLASSES.index(class_name)
+
+        cc, node_map, _ = conceptnet_subgraph_to_cc(sub, embedding_dim, node_list)
+        query_idx = node_map[a]
+        target_idx = node_map[c]
+
+        node_texts = _build_node_texts(sub, node_list)
+
+        meta = {
+            'task_type': 'kg_causal_chain',
+            'node_texts': node_texts,
+            'chain': [a, b, c],
+            'relations': [rel_ab, rel_bc],
+            'class_name': class_name,
+            'num_classes': len(CAUSAL_CHAIN_CLASSES),
+        }
+        return cc, query_idx, target_idx, answer, meta
 
     return None

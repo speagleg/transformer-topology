@@ -48,7 +48,7 @@ training:
   label_smoothing: 0.02
   loss_fn: ce
   focal_gamma: 2.0
-  use_class_weights: true  # CE + class_weights is fine (focal + class_weights is pathological)
+  use_class_weights: false  # disabled: balanced sampling makes class_weights unnecessary
   curl_penalty_weight: 0.01
   curl_penalty_threshold: 0.5
   scheduler: cosine_warm_restarts

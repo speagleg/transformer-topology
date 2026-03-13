@@ -725,10 +725,10 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
         extra_gen_kwargs = {}
         if conceptnet_graph is not None and task.startswith("kg_"):
             extra_gen_kwargs['conceptnet_graph'] = conceptnet_graph
-            # Phase D may specify custom sample counts
-            phase_d_cfg = config.get('phase_d', {})
-            train_samples = phase_d_cfg.get('kg_train_samples', bc.get('train_samples', 5000))
-            val_samples = phase_d_cfg.get('kg_val_samples', bc.get('val_samples', 500))
+            # Check phase-specific config for KG sample counts
+            phase_cfg = config.get(f'phase_{phase_name}', config.get('phase_d', {}))
+            train_samples = phase_cfg.get('kg_train_samples', bc.get('train_samples', 5000))
+            val_samples = phase_cfg.get('kg_val_samples', bc.get('val_samples', 500))
         else:
             train_samples = bc.get('train_samples', 5000)
             val_samples = bc.get('val_samples', 500)
@@ -1137,7 +1137,9 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
     metacog_skip = ['control_head'] if mc.get('use_metacog', False) else None
 
     if skip_a:
-        last_task = PHASE_A_TASKS[-1]
+        # Use config-specified Phase A tasks (v10 has different task list)
+        phase_a_task_list = config.get('phase_a', {}).get('tasks', PHASE_A_TASKS)
+        last_task = phase_a_task_list[-1]
         ckpt_path = checkpoint_dir / f"phase_a_{last_task}.pt"
         if ckpt_path.exists():
             state = torch.load(ckpt_path, map_location='cpu', weights_only=True)

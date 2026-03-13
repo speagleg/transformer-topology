@@ -101,6 +101,20 @@ class TestKgRelation:
         assert "task_prompt" in metadata
         assert "relation" in metadata
 
+    def test_kg_relation_balanced_sampling(self):
+        """Balanced sampling should produce multiple relation categories."""
+        G = _make_test_graph()
+        categories_seen = set()
+        for _ in range(50):
+            _, _, _, answer, metadata = generate_kg_relation_task(
+                G, EMBEDDING_DIM, min_nodes=4, max_nodes=12,
+            )
+            categories_seen.add(metadata["relation"])
+        # Test graph has 7 relation types; we should see at least 3
+        assert len(categories_seen) >= 3, (
+            f"Expected diverse categories, only got {categories_seen}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Task 2: Concept classification
