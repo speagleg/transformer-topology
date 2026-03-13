@@ -21,6 +21,10 @@ def spectral_decomposition(
         eigenvalues: Tensor of shape (n,) or (k,), sorted ascending.
         eigenvectors: Tensor of shape (N, n) or (N, k), columns are eigenvectors.
     """
+    cache_key = (dim, k, normalize)
+    if hasattr(cc, '_spectral_cache') and cache_key in cc._spectral_cache:
+        return cc._spectral_cache[cache_key]
+
     if dim == 0:
         L = hodge_laplacian_0(cc)
     elif dim == 1:
@@ -41,6 +45,9 @@ def spectral_decomposition(
         k = min(k, eigenvalues.shape[0])
         eigenvalues = eigenvalues[:k]
         eigenvectors = eigenvectors[:, :k]
+
+    if hasattr(cc, '_spectral_cache'):
+        cc._spectral_cache[cache_key] = (eigenvalues, eigenvectors)
 
     return eigenvalues, eigenvectors
 

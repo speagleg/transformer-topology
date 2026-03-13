@@ -22,6 +22,20 @@ class CellComplex:
         self._2_cell_signs: list[list[float]] = []  # orientation signs for B2
         self._2_cell_types: list[str] = []
         self.node_texts: list[str] = []
+        # Caching infrastructure (Task 1: GPU optimization)
+        self._boundary_cache: dict[int, torch.Tensor] = {}
+        self._adjacency_cache: dict[int, torch.Tensor] = {}
+        self._edge_index_cache: torch.Tensor | None = None
+        self._topology_version: int = 0
+        self._spectral_cache: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def _invalidate_caches(self):
+        """Clear all topology-dependent caches. Called after any structural mutation."""
+        self._boundary_cache.clear()
+        self._adjacency_cache.clear()
+        self._edge_index_cache = None
+        self._topology_version += 1
+        self._spectral_cache.clear()
 
     @property
     def device(self) -> torch.device:
@@ -36,6 +50,11 @@ class CellComplex:
         self._0_cell_embeddings = [e.to(device) for e in self._0_cell_embeddings]
         self._1_cell_embeddings = [e.to(device) for e in self._1_cell_embeddings]
         self._2_cell_embeddings = [e.to(device) for e in self._2_cell_embeddings]
+        # Cached tensors are device-specific; clear them so they are rebuilt on new device
+        self._boundary_cache.clear()
+        self._adjacency_cache.clear()
+        self._edge_index_cache = None
+        self._spectral_cache.clear()
         return self
 
     def clone(self) -> 'CellComplex':
@@ -53,6 +72,12 @@ class CellComplex:
         cc._2_cell_signs = self._2_cell_signs
         cc._2_cell_types = self._2_cell_types
         cc.node_texts = list(self.node_texts)
+        # Fresh caches for the clone — do not share with the original
+        cc._boundary_cache = {}
+        cc._adjacency_cache = {}
+        cc._edge_index_cache = None
+        cc._topology_version = self._topology_version
+        cc._spectral_cache = {}
         return cc
 
     def num_cells(self, dim: int) -> int:
@@ -71,6 +96,7 @@ class CellComplex:
         idx = len(self._0_cell_embeddings)
         self._0_cell_embeddings.append(embedding.clone())
         self._0_cell_types.append(cell_type)
+        self._invalidate_caches()
         return idx
 
     def add_1_cell(self, source: int, target: int, embedding: torch.Tensor, relation_type: str) -> int:
@@ -83,6 +109,7 @@ class CellComplex:
         self._1_cell_types.append(relation_type)
         self._1_cell_sources.append(source)
         self._1_cell_targets.append(target)
+        self._invalidate_caches()
         return idx
 
     def get_embeddings(self, dim: int) -> torch.Tensor:
@@ -155,6 +182,7 @@ class CellComplex:
         self._2_cell_boundaries.append(list(boundary_edges))
         self._2_cell_signs.append(signs)
         self._2_cell_types.append(cell_type)
+        self._invalidate_caches()
         return idx
 
     def _compute_boundary_signs(self, boundary_edges: list[int]) -> list[float]:
@@ -201,28 +229,37 @@ class CellComplex:
           B_1[source, edge] = -1  (edge leaves source)
           B_1[target, edge] = +1  (edge arrives at target)
         """
+        if dim in self._boundary_cache:
+            cached = self._boundary_cache[dim]
+            if cached.device == self.device:
+                return cached
+
         if dim == 1:
             n0 = self.num_cells(0)
             n1 = self.num_cells(1)
             if n0 == 0 or n1 == 0:
-                return torch.zeros(max(n0, 1), max(n1, 1), device=self.device)
-            B = torch.zeros(n0, n1, device=self.device)
-            for j, (s, t) in enumerate(zip(self._1_cell_sources, self._1_cell_targets)):
-                B[s, j] = -1.0
-                B[t, j] = 1.0
-            return B
+                result = torch.zeros(max(n0, 1), max(n1, 1), device=self.device)
+            else:
+                result = torch.zeros(n0, n1, device=self.device)
+                for j, (s, t) in enumerate(zip(self._1_cell_sources, self._1_cell_targets)):
+                    result[s, j] = -1.0
+                    result[t, j] = 1.0
+            self._boundary_cache[dim] = result
+            return result
         elif dim == 2:
             n1 = self.num_cells(1)
             n2 = self.num_cells(2)
             if n1 == 0 or n2 == 0:
-                return torch.zeros(max(n1, 1), max(n2, 1), device=self.device)
-            B = torch.zeros(n1, n2, device=self.device)
-            for j, (boundary_edges, signs) in enumerate(
-                zip(self._2_cell_boundaries, self._2_cell_signs)
-            ):
-                for e, sign in zip(boundary_edges, signs):
-                    B[e, j] = sign
-            return B
+                result = torch.zeros(max(n1, 1), max(n2, 1), device=self.device)
+            else:
+                result = torch.zeros(n1, n2, device=self.device)
+                for j, (boundary_edges, signs) in enumerate(
+                    zip(self._2_cell_boundaries, self._2_cell_signs)
+                ):
+                    for e, sign in zip(boundary_edges, signs):
+                        result[e, j] = sign
+            self._boundary_cache[dim] = result
+            return result
         raise ValueError(f"Boundary operator for dim={dim} not supported")
 
     def adjacency_matrix(self, dim: int) -> torch.Tensor:
@@ -230,25 +267,32 @@ class CellComplex:
 
         For dim=0, two 0-cells are adjacent if connected by a 1-cell.
         """
+        if dim in self._adjacency_cache:
+            cached = self._adjacency_cache[dim]
+            if cached.device == self.device:
+                return cached
+
         if dim == 0:
             n = self.num_cells(0)
-            A = torch.zeros(n, n, device=self.device)
+            result = torch.zeros(n, n, device=self.device)
             for s, t in zip(self._1_cell_sources, self._1_cell_targets):
-                A[s, t] = 1.0
-                A[t, s] = 1.0
-            return A
+                result[s, t] = 1.0
+                result[t, s] = 1.0
+            self._adjacency_cache[dim] = result
+            return result
         elif dim == 1:
             # Edge-edge adjacency: two 1-cells are adjacent if they share a 0-cell endpoint
             n = self.num_cells(1)
-            A = torch.zeros(n, n, device=self.device)
+            result = torch.zeros(n, n, device=self.device)
             for i in range(n):
                 for j in range(i + 1, n):
                     endpoints_i = {self._1_cell_sources[i], self._1_cell_targets[i]}
                     endpoints_j = {self._1_cell_sources[j], self._1_cell_targets[j]}
                     if endpoints_i & endpoints_j:
-                        A[i, j] = 1.0
-                        A[j, i] = 1.0
-            return A
+                        result[i, j] = 1.0
+                        result[j, i] = 1.0
+            self._adjacency_cache[dim] = result
+            return result
         raise ValueError(f"Adjacency for dim={dim} not supported")
 
     def verify_chain_complex(self) -> bool:
@@ -327,8 +371,14 @@ class CellComplex:
 
     def edge_index(self) -> torch.Tensor:
         """Return PyG-compatible edge_index tensor (2, 2*num_edges) for undirected graph."""
+        if self._edge_index_cache is not None:
+            if self._edge_index_cache.device == self.device:
+                return self._edge_index_cache
+
         sources = self._1_cell_sources
         targets = self._1_cell_targets
         row = torch.tensor(sources + targets, dtype=torch.long, device=self.device)
         col = torch.tensor(targets + sources, dtype=torch.long, device=self.device)
-        return torch.stack([row, col], dim=0)
+        result = torch.stack([row, col], dim=0)
+        self._edge_index_cache = result
+        return result
