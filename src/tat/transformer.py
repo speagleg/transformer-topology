@@ -138,7 +138,8 @@ class TopologyAwareTransformer(nn.Module):
     def forward(self, cc: CellComplex,
                 control_signal: ControlSignal | None = None,
                 semantic_bias: torch.Tensor | None = None,
-                semantic_weight: torch.Tensor | None = None) -> torch.Tensor:
+                semantic_weight: torch.Tensor | None = None,
+                precomputed_pe: torch.Tensor | None = None) -> torch.Tensor:
         """Forward pass through the full transformer.
 
         Extracts node embeddings and adjacency from the cell complex,
@@ -154,6 +155,8 @@ class TopologyAwareTransformer(nn.Module):
                 additive bias on attention logits.
             semantic_weight: Optional scalar tensor in ``[0, 1]`` controlling
                 the strength of ``semantic_bias``.
+            precomputed_pe: Optional precomputed TopologicalPE features from
+                dataset. When provided, skips live gudhi persistence computation.
 
         Returns:
             Output node features of shape (N, embedding_dim).
@@ -168,7 +171,7 @@ class TopologyAwareTransformer(nn.Module):
         edge_weights = cc.edge_weight_matrix(feature_dim=0) if cc.num_cells(1) > 0 else None
 
         if self.use_topological_pe:
-            topo_pe = self.topo_pe(cc)
+            topo_pe = self.topo_pe(cc, precomputed_features=precomputed_pe)
             x = x + topo_pe
 
         for block in self.blocks:

@@ -76,14 +76,12 @@ class TopologicalPositionalEncoding(nn.Module):
         self.norm = nn.LayerNorm(embedding_dim)
         self.act = nn.GELU()
 
-    def forward(self, cc: CellComplex) -> torch.Tensor:
-        """Compute topological positional encodings for all nodes.
+    def precompute_features(self, cc: CellComplex) -> torch.Tensor:
+        """Precompute raw PE features (lap_pe + persistence + membership).
 
-        Args:
-            cc: Cell complex with node embeddings.
-
-        Returns:
-            Tensor of shape (num_nodes, embedding_dim).
+        Returns tensor of shape (num_nodes, input_dim) that can be stored in
+        dataset metadata and passed to forward() to skip live computation
+        (especially the expensive gudhi persistence).
         """
         num_nodes = cc.num_cells(0)
 
@@ -95,7 +93,7 @@ class TopologicalPositionalEncoding(nn.Module):
                               device=lap_pe.device)
             lap_pe = torch.cat([lap_pe, pad], dim=1)
 
-        # Persistence features (computed on CPU via numpy/gudhi, move to device)
+        # Persistence features (computed on CPU via numpy/gudhi)
         pers_feat = persistence_node_features(cc, num_features=self.num_persistence_features)
         pers_feat = pers_feat.to(cc.device)
 
@@ -108,5 +106,24 @@ class TopologicalPositionalEncoding(nn.Module):
         elif membership.shape[1] > self.max_2_cells:
             membership = membership[:, :self.max_2_cells]
 
-        combined = torch.cat([lap_pe, pers_feat, membership], dim=1)
+        return torch.cat([lap_pe, pers_feat, membership], dim=1)
+
+    def forward(self, cc: CellComplex,
+                precomputed_features: torch.Tensor | None = None) -> torch.Tensor:
+        """Compute topological positional encodings for all nodes.
+
+        Args:
+            cc: Cell complex with node embeddings.
+            precomputed_features: Optional precomputed raw features from
+                precompute_features(). When provided, skips live computation
+                (including gudhi persistence).
+
+        Returns:
+            Tensor of shape (num_nodes, embedding_dim).
+        """
+        if precomputed_features is not None:
+            combined = precomputed_features.to(cc.device)
+        else:
+            combined = self.precompute_features(cc)
+
         return self.act(self.norm(self.proj(combined)))

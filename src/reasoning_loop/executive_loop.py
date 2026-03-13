@@ -192,6 +192,7 @@ class ExecutiveReasoningLoop(nn.Module):
                 task_id: int | None = None,
                 text_embeddings: torch.Tensor | None = None,
                 force_fusion_weight: float | None = None,
+                precomputed_pe: torch.Tensor | None = None,
                 ) -> tuple[torch.Tensor, int, dict]:
         """Run the hierarchical executive reasoning loop.
 
@@ -224,7 +225,8 @@ class ExecutiveReasoningLoop(nn.Module):
         # ---- Dual-track path: fixed 2-iteration asymmetric loop ----
         if self.use_dual_track:
             return self._forward_dual_track(cc, topo_features, task_id,
-                                            text_embeddings, force_fusion_weight)
+                                            text_embeddings, force_fusion_weight,
+                                            precomputed_pe)
 
         # ---- Standard (non-dual-track) path ----
         prev_embeddings = cc.get_embeddings(0)
@@ -296,7 +298,8 @@ class ExecutiveReasoningLoop(nn.Module):
             # 3. TAT executes with control signals + semantic bias
             tat_out = self.tat(cc, control_signal=control,
                                semantic_bias=semantic_bias,
-                               semantic_weight=semantic_weight)
+                               semantic_weight=semantic_weight,
+                               precomputed_pe=precomputed_pe)
 
             # 4. Confidence-weighted integration
             confidence = control.confidence_weights.unsqueeze(-1)  # (N, 1)
@@ -350,6 +353,7 @@ class ExecutiveReasoningLoop(nn.Module):
         task_id: int | None,
         text_embeddings: torch.Tensor | None,
         force_fusion_weight: float | None,
+        precomputed_pe: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, int, dict]:
         """Dual-track forward: iteration 1 (structural) + iteration 2 (cross-modal fusion).
 
@@ -392,7 +396,7 @@ class ExecutiveReasoningLoop(nn.Module):
         cc.set_embeddings(0, gnn_out)
 
         # TAT iteration 1
-        h_struct = self.tat(cc, control_signal=control)
+        h_struct = self.tat(cc, control_signal=control, precomputed_pe=precomputed_pe)
 
         # Confidence-weighted integration (iteration 1)
         confidence = control.confidence_weights.unsqueeze(-1)
@@ -421,7 +425,7 @@ class ExecutiveReasoningLoop(nn.Module):
             cc.set_embeddings(0, h_cross)
 
             # TAT iteration 2
-            h_fused = self.tat(cc, control_signal=control)
+            h_fused = self.tat(cc, control_signal=control, precomputed_pe=precomputed_pe)
 
             # Blend: (1-fw)*structural + fw*fused
             h_out = (1 - fw) * h_struct + fw * h_fused
@@ -446,6 +450,131 @@ class ExecutiveReasoningLoop(nn.Module):
         diagnostics['convergence_deltas'].append(delta)
 
         return h_out, 2, diagnostics
+
+    def forward_dual_track_batched(
+        self,
+        ccs: list[CellComplex],
+        topo_features_list: list[torch.Tensor] | None = None,
+        task_id: int | None = None,
+        text_embeddings_list: list[torch.Tensor | None] | None = None,
+        force_fusion_weight: float | None = None,
+        precomputed_pe_list: list[torch.Tensor | None] | None = None,
+    ) -> list[tuple[torch.Tensor, int, dict]]:
+        """Batched dual-track forward: process multiple CellComplexes.
+
+        Per-graph operations (eigendecomp, harmonic energy) run sequentially.
+        Provides the batched interface for the v10 training loop with reduced
+        Python overhead vs calling forward() in a loop.
+
+        Args:
+            ccs: List of B CellComplexes (already on device).
+            topo_features_list: Optional list of topo feature tensors per graph.
+            task_id: Integer task index for ControlHead.
+            text_embeddings_list: Optional list of per-graph text embeddings.
+            force_fusion_weight: Optional forced fusion weight (overrides learned).
+            precomputed_pe_list: Optional list of precomputed TopologicalPE features.
+
+        Returns:
+            List of (embeddings, num_iters, diagnostics) per graph.
+        """
+        B = len(ccs)
+        device = ccs[0].device
+
+        # Structural features (per-graph, cheap)
+        if self.use_structural_features:
+            for cc in ccs:
+                struct_feat = self.structural_encoder(cc)
+                cc.set_embeddings(0, (cc.get_embeddings(0) + struct_feat).detach())
+
+        # Pre-iteration: collect per-graph data
+        prev_embeddings = [cc.get_embeddings(0) for cc in ccs]
+        harmonic_energies = [self._compute_harmonic_energy(cc).detach() for cc in ccs]
+
+        all_diagnostics = [{
+            'harmonic_energies': [he.item()],
+            'convergence_deltas': [],
+            'control_signals': [],
+        } for he in harmonic_energies]
+
+        # === Iteration 1: Structural (per-graph GNN + wave + TAT) ===
+        gnn_outputs = []
+        edge_outputs = []
+        controls = []
+        for g in range(B):
+            topo_feat = topo_features_list[g] if topo_features_list else None
+            gnn_out, edge_out, control = self.gnn_executive.forward_with_control(
+                ccs[g], harmonic_energy=harmonic_energies[g],
+                topo_features=topo_feat, task_id=task_id,
+            )
+            all_diagnostics[g]['control_signals'].append(control)
+
+            if self.use_wave_dynamics:
+                with torch.amp.autocast('cuda', enabled=False):
+                    wave_out = self.wave_dynamics(
+                        ccs[g], gnn_out.float(),
+                        diffusion_time=control.diffusion_time.float(),
+                        wave_damping=control.wave_damping.float(),
+                        filter_weights=(control.filter_weights.float()
+                                        if control.filter_weights is not None else None),
+                    )
+                gnn_out = gnn_out + wave_out.to(gnn_out.dtype)
+
+            ccs[g].set_embeddings(0, gnn_out)
+            gnn_outputs.append(gnn_out)
+            edge_outputs.append(edge_out)
+            controls.append(control)
+
+        # TAT iteration 1 (per-graph — eigendecomp is graph-specific)
+        h_structs = []
+        for g in range(B):
+            pe = precomputed_pe_list[g] if precomputed_pe_list else None
+            h_s = self.tat(ccs[g], control_signal=controls[g], precomputed_pe=pe)
+            confidence = controls[g].confidence_weights.unsqueeze(-1)
+            h_s = confidence * h_s + (1 - confidence) * gnn_outputs[g]
+            h_s = self.norm(h_s + prev_embeddings[g])
+            h_structs.append(h_s)
+
+        # === Iteration 2: Cross-modal fusion (per-graph) ===
+        h_outs = []
+        for g in range(B):
+            control = controls[g]
+            if force_fusion_weight is not None:
+                fw = torch.tensor(force_fusion_weight, device=device,
+                                  dtype=h_structs[g].dtype)
+            else:
+                fw = control.fusion_weight
+            all_diagnostics[g]['fusion_weight'] = fw.item() if torch.is_tensor(fw) else fw
+
+            text_emb = text_embeddings_list[g] if text_embeddings_list else None
+            if text_emb is not None and (not torch.is_tensor(fw) or fw.item() > 0):
+                edge_index = self._extract_edge_index(ccs[g])
+                h_text_gnn = self.text_gnn(h_structs[g], edge_index, text_emb)
+                h_cross = self.cross_attn(h_text_gnn, text_emb)
+                ccs[g].set_embeddings(0, h_cross)
+                pe = precomputed_pe_list[g] if precomputed_pe_list else None
+                h_fused = self.tat(ccs[g], control_signal=control, precomputed_pe=pe)
+                h_out = (1 - fw) * h_structs[g] + fw * h_fused
+            else:
+                h_out = h_structs[g]
+                all_diagnostics[g]['fusion_weight'] = 0.0
+
+            # Write final embeddings back
+            ccs[g].set_embeddings(0, h_out.detach())
+            if edge_outputs[g] is not None:
+                old_edge = ccs[g].get_embeddings(1)
+                r = self.edge_residual_ratio
+                blended = (1 - r) * edge_outputs[g] + r * old_edge
+                ccs[g].set_embeddings(1, blended.detach())
+
+            # Final harmonic energy
+            final_he = self._compute_harmonic_energy(ccs[g])
+            all_diagnostics[g]['harmonic_energies'].append(final_he.item())
+            delta = abs(final_he.item() - harmonic_energies[g].item())
+            all_diagnostics[g]['convergence_deltas'].append(delta)
+
+            h_outs.append(h_out)
+
+        return [(h_outs[g], 2, all_diagnostics[g]) for g in range(B)]
 
     def forward_batched(
         self, ccs: list[CellComplex],

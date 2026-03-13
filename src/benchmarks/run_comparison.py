@@ -469,10 +469,16 @@ class HierarchicalMultiHopModel(nn.Module):
             if node_texts:
                 text_embeddings = self.qwen_encoder(node_texts, dev)
 
+        # Extract precomputed PE features from metadata (eliminates gudhi at training time)
+        precomputed_pe = None
+        if metadata is not None:
+            precomputed_pe = metadata.get('precomputed_pe', None)
+
         # Dual-track executive loop (iter 1: structural, iter 2: cross-modal fusion)
         output, num_iters, diagnostics = self.executive_loop(
             cc, topo_features=topo_features, task_id=task_id,
             text_embeddings=text_embeddings,
+            precomputed_pe=precomputed_pe,
         )
 
         # Store diagnostics for aux loss / logging

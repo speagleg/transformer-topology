@@ -27,6 +27,99 @@ def graph_collate_fn(samples):
     return [_unpack_sample(s) for s in samples]
 
 
+def _forward_batch_v10(model, batch, device, task=None, topo_features=None):
+    """Batched forward for v10 dual-track models.
+
+    Uses forward_dual_track_batched() for the executive loop, then
+    per-graph AttentionReadout + classifier.
+    """
+    results = []
+
+    # Unpack and prepare batch
+    ccs = []
+    queries = []
+    targets = []
+    answers = []
+    metadatas = []
+    for cc, query, target, answer, metadata in batch:
+        cc = cc.clone().to(device)
+        ccs.append(cc)
+        queries.append(query)
+        targets.append(target)
+        answers.append(answer)
+        metadatas.append(metadata or {})
+
+    # Map task to ID
+    task_id = 0
+    if task is not None:
+        from src.benchmarks.benchmark_dataset import TASK_REGISTRY
+        task_list = sorted(TASK_REGISTRY.keys())
+        if task in task_list:
+            task_id = task_list.index(task)
+
+    # Batch QwenEncoder: encode texts per-graph (Qwen has its own caching)
+    text_embeddings_list = [None] * len(ccs)
+    if (hasattr(model, 'qwen_encoder') and model.qwen_encoder is not None
+            and not getattr(model, 'bypass_llm', False)):
+        for g, cc in enumerate(ccs):
+            node_texts = getattr(cc, 'node_texts', None) or None
+            if node_texts is None:
+                node_texts = metadatas[g].get('node_texts', None)
+            if node_texts:
+                text_embeddings_list[g] = model.qwen_encoder(node_texts, device)
+
+    # Collect precomputed PE features from metadata
+    precomputed_pe_list = [m.get('precomputed_pe', None) for m in metadatas]
+
+    # Build per-graph topo_features list
+    topo_features_list = [topo_features] * len(ccs) if topo_features is not None else None
+
+    # Batched executive loop
+    loop_results = model.executive_loop.forward_dual_track_batched(
+        ccs,
+        topo_features_list=topo_features_list,
+        task_id=task_id,
+        text_embeddings_list=text_embeddings_list,
+        precomputed_pe_list=precomputed_pe_list,
+    )
+
+    # Per-graph AttentionReadout + classifier
+    for g, (output, num_iters, diagnostics) in enumerate(loop_results):
+        model._last_num_iters = num_iters
+        control_signals = diagnostics.get('control_signals', [])
+        if control_signals:
+            model._last_control = control_signals[-1]
+
+        fw_val = diagnostics.get('fusion_weight', None)
+        if fw_val is not None and not isinstance(fw_val, torch.Tensor):
+            fw_val = torch.tensor(fw_val, device=device)
+        elif fw_val is None:
+            fw_val = torch.tensor(0.0, device=device)
+
+        tf = topo_features if topo_features is not None else torch.zeros(4, device=device)
+        tf = tf.to(device)
+        if tf.shape[0] > 4:
+            tf = tf[:4]
+        elif tf.shape[0] < 4:
+            tf = torch.cat([tf, torch.zeros(4 - tf.shape[0], device=device)])
+
+        combined = model.attention_readout.build_classifier_input(
+            output, queries[g], targets[g],
+            task_id=task_id,
+            topo_features=tf,
+            fusion_weight=fw_val,
+        )
+        model._last_combined = combined.detach()
+
+        if task is not None and getattr(model, 'multi_head_classifier', None) is not None:
+            logits = model.multi_head_classifier(combined.unsqueeze(0), task).squeeze(0)
+        else:
+            logits = model.classifier(combined)
+        results.append((logits, answers[g]))
+
+    return results
+
+
 def _forward_batch(model, batch, device, task=None, topo_features=None):
     """Forward pass for a batch of samples, using batched DSM when available.
 
@@ -44,6 +137,12 @@ def _forward_batch(model, batch, device, task=None, topo_features=None):
     Uses model.executive_loop.forward_batched() when the model has DSM enabled,
     otherwise falls back to sequential per-graph forward passes.
     """
+    # v10 dual-track batched path
+    if (hasattr(model, 'executive_loop')
+            and getattr(model.executive_loop, 'use_dual_track', False)):
+        return _forward_batch_v10(model, batch, device, task=task,
+                                  topo_features=topo_features)
+
     results = []
 
     # Check if the model supports batched DSM forward

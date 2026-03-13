@@ -390,6 +390,45 @@ class BenchmarkDataset:
         return obj
 
 
+def precompute_pe_for_sample(
+    cc: CellComplex,
+    num_eigenvectors: int = 8,
+    num_persistence_features: int = 8,
+    max_2_cells: int = 32,
+) -> torch.Tensor:
+    """Precompute TopologicalPE features for a CellComplex sample.
+
+    Computes laplacian PE, persistence features (gudhi), and cell membership
+    once during dataset generation so they can be reused at training time
+    without calling gudhi in the hot loop.
+
+    Returns:
+        Tensor of shape (num_nodes, num_eigenvectors + num_persistence_features + max_2_cells).
+    """
+    from src.spectral.positional_encoding import (
+        laplacian_pe, cell_membership_encoding,
+    )
+    from src.spectral.persistence import persistence_node_features
+
+    num_nodes = cc.num_cells(0)
+    k = min(num_eigenvectors, num_nodes)
+    lap_pe = laplacian_pe(cc, dim=0, k=k)
+    if lap_pe.shape[1] < num_eigenvectors:
+        pad = torch.zeros(num_nodes, num_eigenvectors - lap_pe.shape[1])
+        lap_pe = torch.cat([lap_pe, pad], dim=1)
+
+    pers_feat = persistence_node_features(cc, num_features=num_persistence_features)
+
+    membership = cell_membership_encoding(cc)
+    if membership.shape[1] < max_2_cells:
+        pad = torch.zeros(num_nodes, max_2_cells - membership.shape[1])
+        membership = torch.cat([membership, pad], dim=1)
+    elif membership.shape[1] > max_2_cells:
+        membership = membership[:, :max_2_cells]
+
+    return torch.cat([lap_pe, pers_feat, membership], dim=1)
+
+
 def get_max_classes(task_type: str) -> int:
     """Return the number of output classes for a task type."""
     if task_type not in TASK_REGISTRY:
