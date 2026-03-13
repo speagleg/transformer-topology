@@ -29,8 +29,18 @@ class CellComplex:
         self._topology_version: int = 0
         self._spectral_cache: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
 
+    def _ensure_caches(self):
+        """Initialize cache attributes for objects deserialized from old format."""
+        if not hasattr(self, '_boundary_cache'):
+            self._boundary_cache = {}
+            self._adjacency_cache = {}
+            self._edge_index_cache = None
+            self._topology_version = 0
+            self._spectral_cache = {}
+
     def _invalidate_caches(self):
         """Clear all topology-dependent caches. Called after any structural mutation."""
+        self._ensure_caches()
         self._boundary_cache.clear()
         self._adjacency_cache.clear()
         self._edge_index_cache = None
@@ -51,6 +61,7 @@ class CellComplex:
         self._1_cell_embeddings = [e.to(device) for e in self._1_cell_embeddings]
         self._2_cell_embeddings = [e.to(device) for e in self._2_cell_embeddings]
         # Cached tensors are device-specific; clear them so they are rebuilt on new device
+        self._ensure_caches()
         self._boundary_cache.clear()
         self._adjacency_cache.clear()
         self._edge_index_cache = None
@@ -76,6 +87,7 @@ class CellComplex:
         cc._boundary_cache = {}
         cc._adjacency_cache = {}
         cc._edge_index_cache = None
+        self._ensure_caches()
         cc._topology_version = self._topology_version
         cc._spectral_cache = {}
         return cc
@@ -229,6 +241,7 @@ class CellComplex:
           B_1[source, edge] = -1  (edge leaves source)
           B_1[target, edge] = +1  (edge arrives at target)
         """
+        self._ensure_caches()
         if dim in self._boundary_cache:
             cached = self._boundary_cache[dim]
             if cached.device == self.device:
@@ -267,6 +280,7 @@ class CellComplex:
 
         For dim=0, two 0-cells are adjacent if connected by a 1-cell.
         """
+        self._ensure_caches()
         if dim in self._adjacency_cache:
             cached = self._adjacency_cache[dim]
             if cached.device == self.device:
@@ -371,6 +385,7 @@ class CellComplex:
 
     def edge_index(self) -> torch.Tensor:
         """Return PyG-compatible edge_index tensor (2, 2*num_edges) for undirected graph."""
+        self._ensure_caches()
         if self._edge_index_cache is not None:
             if self._edge_index_cache.device == self.device:
                 return self._edge_index_cache
