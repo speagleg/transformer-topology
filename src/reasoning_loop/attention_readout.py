@@ -14,15 +14,16 @@ class AttentionReadout(nn.Module):
     using a query constructed from the task embedding + local node embeddings.
     """
 
-    def __init__(self, embed_dim: int, num_tasks: int = 19):
+    def __init__(self, embed_dim: int, num_tasks: int = 19, text_dim: int = 0):
         super().__init__()
         self.embed_dim = embed_dim
         self.task_embedding = nn.Embedding(num_tasks, embed_dim)
         # Query projection: [task_emb, h_query, h_target] -> readout_query
         self.query_proj = nn.Linear(3 * embed_dim, embed_dim)
         self._scale = math.sqrt(embed_dim)
-        # Default output: h_query(D) + h_target(D) + context(D) + topo(4) + fusion(1)
-        self.output_dim = 3 * embed_dim + 4 + 1
+        self.text_dim = text_dim
+        # Default output: h_query(D) + h_target(D) + context(D) + topo(4) + fusion(1) + 2*text_dim
+        self.output_dim = 3 * embed_dim + 4 + 1 + 2 * text_dim
 
     def forward(
         self,
@@ -63,10 +64,11 @@ class AttentionReadout(nn.Module):
         task_id: int | None = None,
         topo_features: torch.Tensor | None = None,
         fusion_weight: torch.Tensor | None = None,
+        text_embeddings: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Assemble full classifier input vector.
 
-        Returns: tensor of h_query(32) + h_target(32) + context(32) + topo(4) + fusion(1) = 101
+        Returns: tensor of h_query(D) + h_target(D) + context(D) + topo(4) + fusion(1) + text_q(text_dim) + text_t(text_dim)
         """
         context = self(h_out, query_idx, target_idx, task_id)
 
@@ -81,5 +83,13 @@ class AttentionReadout(nn.Module):
 
         if fusion_weight is not None:
             parts.append(fusion_weight.unsqueeze(0) if fusion_weight.dim() == 0 else fusion_weight)
+
+        if self.text_dim > 0 and text_embeddings is not None:
+            parts.append(text_embeddings[query_idx])
+            parts.append(text_embeddings[target_idx])
+        elif self.text_dim > 0:
+            # No text available — zero-pad to maintain consistent dim
+            parts.append(torch.zeros(self.text_dim, device=h_out.device))
+            parts.append(torch.zeros(self.text_dim, device=h_out.device))
 
         return torch.cat(parts)
