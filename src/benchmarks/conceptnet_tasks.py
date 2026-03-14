@@ -539,13 +539,49 @@ def _get_relation_index(G: nx.Graph) -> dict[str, list[tuple[str, str]]]:
 
     index: dict[str, list[tuple[str, str]]] = {cat: [] for cat in RELATION_CLASSES}
     for u, v, data in G.edges(data=True):
-        raw_rel = data.get("relation", data.get("raw_relation", "RelatedTo"))
+        raw_rel = data.get("raw_relation", data.get("relation", "RelatedTo"))
         cat = categorize_relation(raw_rel)
         if cat in index:
             index[cat].append((u, v))
 
     # Remove empty categories
     index = {k: v for k, v in index.items() if v}
+
+    # Augment Negation class with synthetic negative pairs.
+    # Real negation edges (NotCapableOf, NotHasProperty, NotDesires) are sparse
+    # (~3.5k).  We generate pairs where two nodes are 2-hop neighbors but share
+    # NO direct edge — the model must learn "no direct relation."
+    _NEGATION_TARGET = 12000
+    neg_key = "Negation"
+    real_neg = len(index.get(neg_key, []))
+    if real_neg < _NEGATION_TARGET:
+        needed = _NEGATION_TARGET - real_neg
+        nodes = list(G.nodes())
+        if len(nodes) > 1000:
+            synth_neg: list[tuple[str, str]] = []
+            adjacency = set()
+            for u, v in G.edges():
+                adjacency.add((u, v))
+                adjacency.add((v, u))
+            attempts = 0
+            max_attempts = needed * 10
+            while len(synth_neg) < needed and attempts < max_attempts:
+                attempts += 1
+                a = random.choice(nodes)
+                neighbors_a = set(G.neighbors(a))
+                if len(neighbors_a) < 2:
+                    continue
+                bridge = random.choice(list(neighbors_a))
+                hop2 = [n for n in G.neighbors(bridge)
+                        if n != a and n not in neighbors_a]
+                if not hop2:
+                    continue
+                c = random.choice(hop2)
+                if (a, c) not in adjacency:
+                    synth_neg.append((a, c))
+            if neg_key not in index:
+                index[neg_key] = []
+            index[neg_key].extend(synth_neg)
 
     G._relation_index = index  # type: ignore[attr-defined]
     return index
@@ -587,6 +623,8 @@ def generate_kg_relation_task(
     # Build subgraph seeded from one of the edge's endpoints
     seed_node = random.choice([u_seed, v_seed])
     u, v = None, None
+    is_negation = False
+    data: dict = {}
     for _ in range(_MAX_RETRIES):
         try:
             sub, node_list = extract_subgraph(
@@ -599,14 +637,42 @@ def generate_kg_relation_task(
             continue
 
         # Find an edge of the target category in this subgraph
-        matching = [
-            (eu, ev, d) for eu, ev, d in sub.edges(data=True)
-            if categorize_relation(d.get("relation", d.get("raw_relation", "RelatedTo"))) == target_category
-        ]
-        if matching:
-            u, v, data = random.choice(matching)
-            break
-        # Subgraph didn't contain target category — retry with new seed edge
+        if target_category == "Negation":
+            # For negation: target pair may not share a direct edge.
+            # Strategy: find two non-adjacent nodes within the subgraph.
+            if u_seed in node_list and v_seed in node_list:
+                u, v = u_seed, v_seed
+                is_negation = True
+                break
+            # Fallback: find any pair of non-adjacent nodes in subgraph
+            sub_nodes = list(sub.nodes())
+            sub_adj = set()
+            for eu, ev in sub.edges():
+                sub_adj.add((eu, ev))
+                sub_adj.add((ev, eu))
+            found_neg = False
+            random.shuffle(sub_nodes)
+            for ni in sub_nodes[:20]:
+                for nj in sub_nodes[:20]:
+                    if ni != nj and (ni, nj) not in sub_adj:
+                        u, v = ni, nj
+                        is_negation = True
+                        found_neg = True
+                        break
+                if found_neg:
+                    break
+            if found_neg:
+                break
+        else:
+            matching = [
+                (eu, ev, d) for eu, ev, d in sub.edges(data=True)
+                if categorize_relation(d.get("raw_relation", d.get("relation", "RelatedTo"))) == target_category
+            ]
+            if matching:
+                u, v, data = random.choice(matching)
+                is_negation = False
+                break
+        # Subgraph didn't contain target — retry with new seed edge
         u_seed, v_seed = random.choice(rel_index[target_category])
         seed_node = random.choice([u_seed, v_seed])
 
@@ -617,28 +683,33 @@ def generate_kg_relation_task(
         if not edges:
             raise ValueError("Subgraph has no edges")
         u, v, data = random.choice(edges)
+        is_negation = False
 
-    raw_rel = data.get("relation", data.get("raw_relation", "RelatedTo"))
-    category = categorize_relation(raw_rel)
+    if is_negation:
+        category = "Negation"
+    else:
+        raw_rel = data.get("raw_relation", data.get("relation", "RelatedTo"))
+        category = categorize_relation(raw_rel)
     answer = RELATION_CLASSES.index(category) if category in RELATION_CLASSES else RELATION_CLASSES.index("RelatedTo")
 
     cc, node_map, _ = conceptnet_subgraph_to_cc(sub, embedding_dim, node_list)
 
     # Mask the target edge's relation encoding to prevent data leakage
-    # (the model shouldn't be able to read the answer from the edge embedding)
-    from src.data.conceptnet import RELATION_CATEGORIES
-    n_rels = len(RELATION_CATEGORIES)
-    qi, ti = node_map[u], node_map[v]
-    B1 = cc.boundary_operator(1)
-    if B1 is not None and B1.numel() > 0:
-        edge_embs = cc.get_embeddings(1)
-        for edge_idx in range(B1.shape[1]):
-            col = B1[:, edge_idx]
-            nz = col.nonzero(as_tuple=False).squeeze(-1).tolist()
-            if set(nz) == {qi, ti}:
-                edge_embs[edge_idx, 1:min(1 + n_rels, edge_embs.shape[1])] = 0.0
-                break
-        cc.set_embeddings(1, edge_embs)
+    # (skip for Negation — there is no target edge to mask)
+    if not is_negation:
+        from src.data.conceptnet import RELATION_CATEGORIES
+        n_rels = len(RELATION_CATEGORIES)
+        qi, ti = node_map[u], node_map[v]
+        B1 = cc.boundary_operator(1)
+        if B1 is not None and B1.numel() > 0:
+            edge_embs = cc.get_embeddings(1)
+            for edge_idx in range(B1.shape[1]):
+                col = B1[:, edge_idx]
+                nz = col.nonzero(as_tuple=False).squeeze(-1).tolist()
+                if set(nz) == {qi, ti}:
+                    edge_embs[edge_idx, 1:min(1 + n_rels, edge_embs.shape[1])] = 0.0
+                    break
+            cc.set_embeddings(1, edge_embs)
 
     node_texts = _build_node_texts(sub, node_list)
 

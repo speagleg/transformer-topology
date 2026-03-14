@@ -94,3 +94,45 @@ def test_relation_classes_matches_categories():
 
 def test_task_registry_kg_relation_16_classes():
     assert get_max_classes("kg_relation") == 16
+
+
+import networkx as nx
+
+
+def _make_small_conceptnet(n_nodes=1500):
+    """Build a small synthetic ConceptNet-like graph for testing."""
+    G = nx.Graph()
+    for i in range(n_nodes):
+        G.add_node(f"/c/en/concept_{i}")
+    raw_rels = ["IsA", "UsedFor", "CapableOf", "HasProperty", "AtLocation",
+                "Causes", "PartOf", "RelatedTo", "Synonym", "Antonym"]
+    for i in range(n_nodes - 1):
+        rel = raw_rels[i % len(raw_rels)]
+        G.add_edge(f"/c/en/concept_{i}", f"/c/en/concept_{i+1}",
+                   relation=rel, raw_relation=rel, weight=1.0)
+    for i in range(0, n_nodes - 10, 3):
+        rel = raw_rels[(i // 3) % len(raw_rels)]
+        G.add_edge(f"/c/en/concept_{i}", f"/c/en/concept_{i+5}",
+                   relation=rel, raw_relation=rel, weight=1.0)
+    for i in range(0, 30, 3):
+        G.add_edge(f"/c/en/concept_{i}", f"/c/en/concept_{i+2}",
+                   relation="NotCapableOf", raw_relation="NotCapableOf", weight=1.0)
+    return G
+
+
+def test_relation_index_negation_augmented():
+    from src.benchmarks.conceptnet_tasks import _get_relation_index
+    G = _make_small_conceptnet(1500)
+    index = _get_relation_index(G)
+    assert "Negation" in index
+    assert len(index["Negation"]) > 10
+
+
+def test_relation_index_prefers_raw_relation():
+    from src.benchmarks.conceptnet_tasks import _get_relation_index
+    G = nx.Graph()
+    G.add_node("a")
+    G.add_node("b")
+    G.add_edge("a", "b", relation="PartOf", raw_relation="HasSubevent", weight=1.0)
+    index = _get_relation_index(G)
+    assert ("a", "b") in index.get("HasSubevent", [])
