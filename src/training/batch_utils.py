@@ -103,11 +103,13 @@ def _forward_batch_v10(model, batch, device, task=None, topo_features=None):
         elif tf.shape[0] < 4:
             tf = torch.cat([tf, torch.zeros(4 - tf.shape[0], device=device)])
 
+        text_for_classifier = diagnostics.get('text_embeddings', None)
         combined = model.attention_readout.build_classifier_input(
             output, queries[g], targets[g],
             task_id=task_id,
             topo_features=tf,
             fusion_weight=fw_val,
+            text_embeddings=text_for_classifier,
         )
         model._last_combined = combined.detach()
 
@@ -416,7 +418,10 @@ def train_epoch_batched(
     if bridge_optimizer is not None:
         bridge_optimizer.zero_grad()
 
-    for batch_indices in batches:
+    num_batches = len(batches)
+    log_interval = max(1, num_batches // 10)  # Log ~10 times per epoch
+
+    for batch_idx, batch_indices in enumerate(batches):
         optimizer.zero_grad()
         samples = [_unpack_sample(dataset[i]) for i in batch_indices]
 
@@ -501,6 +506,11 @@ def train_epoch_batched(
 
             total_loss += batch_loss.item() * valid_count
             n_samples += valid_count
+
+        if batch_idx % log_interval == 0 or batch_idx == num_batches - 1:
+            avg = total_loss / max(n_samples, 1)
+            print(f"    batch {batch_idx+1}/{num_batches}  loss={avg:.4f}  "
+                  f"samples={n_samples}", flush=True)
 
     # Final bridge step for remaining accumulated gradients
     if bridge_optimizer is not None and bridge_batch_count % bridge_accumulation_steps != 0:

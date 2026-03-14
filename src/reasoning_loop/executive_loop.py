@@ -23,7 +23,7 @@ from src.tat.transformer import TopologyAwareTransformer
 from src.wave.dynamics import WaveDynamics, SheafWaveDynamics, MultiFilterDynamics
 from src.spectral.decomposition import hodge_decomposition
 from src.reasoning_loop.text_conditioned_gnn import TextConditionedGNN
-from src.reasoning_loop.cross_attention import CrossAttentionBlock
+from src.reasoning_loop.cross_attention import BidirectionalCrossAttention
 
 
 class ExecutiveReasoningLoop(nn.Module):
@@ -161,8 +161,8 @@ class ExecutiveReasoningLoop(nn.Module):
             self.text_gnn = TextConditionedGNN(
                 embed_dim=embedding_dim, hidden_dim=embedding_dim, num_layers=2,
             )
-            self.cross_attn = CrossAttentionBlock(
-                embed_dim=embedding_dim, num_heads=4,
+            self.cross_attn = BidirectionalCrossAttention(
+                embed_dim=embedding_dim, num_heads=4, dropout=0.1,
             )
 
     def _compute_harmonic_energy(self, cc: CellComplex) -> torch.Tensor:
@@ -418,8 +418,11 @@ class ExecutiveReasoningLoop(nn.Module):
             # TextConditionedGNN: structural + text similarity modulation
             h_text_gnn = self.text_gnn(h_struct, edge_index, text_embeddings)
 
-            # CrossAttention: structural attends to text
-            h_cross = self.cross_attn(h_text_gnn, text_embeddings)
+            # BidirectionalCrossAttention: structural ↔ text
+            h_cross, h_text_enriched = self.cross_attn(h_text_gnn, text_embeddings)
+            # NOTE: h_text_enriched must not be detached — gradients flow through
+            # this tensor to the t→s cross-attention parameters.
+            diagnostics['text_embeddings'] = h_text_enriched
 
             # Update CC for TAT iteration 2 (no detach for gradient flow)
             cc.set_embeddings(0, h_cross)
@@ -478,6 +481,7 @@ class ExecutiveReasoningLoop(nn.Module):
             List of (embeddings, num_iters, diagnostics) per graph.
         """
         B = len(ccs)
+        enriched_text: list[torch.Tensor | None] = [None] * B
         device = ccs[0].device
 
         # Structural features (per-graph, cheap)
@@ -549,8 +553,9 @@ class ExecutiveReasoningLoop(nn.Module):
             if text_emb is not None and (not torch.is_tensor(fw) or fw.item() > 0):
                 edge_index = self._extract_edge_index(ccs[g])
                 h_text_gnn = self.text_gnn(h_structs[g], edge_index, text_emb)
-                h_cross = self.cross_attn(h_text_gnn, text_emb)
+                h_cross, h_text_enriched = self.cross_attn(h_text_gnn, text_emb)
                 ccs[g].set_embeddings(0, h_cross)
+                enriched_text[g] = h_text_enriched
                 pe = precomputed_pe_list[g] if precomputed_pe_list else None
                 h_fused = self.tat(ccs[g], control_signal=control, precomputed_pe=pe)
                 h_out = (1 - fw) * h_structs[g] + fw * h_fused
@@ -574,7 +579,13 @@ class ExecutiveReasoningLoop(nn.Module):
 
             h_outs.append(h_out)
 
-        return [(h_outs[g], 2, all_diagnostics[g]) for g in range(B)]
+        results = []
+        for g in range(B):
+            # NOTE: enriched_text[g] must not be detached — gradients flow through
+            # this tensor to the t→s cross-attention parameters.
+            all_diagnostics[g]['text_embeddings'] = enriched_text[g]
+            results.append((h_outs[g], 2, all_diagnostics[g]))
+        return results
 
     def forward_batched(
         self, ccs: list[CellComplex],
