@@ -1189,12 +1189,12 @@ def generate_kg_transitive_task(
         random.shuffle(nodes)
         for a in nodes:
             for b in (sub.successors(a) if sub.is_directed() else sub.neighbors(a)):
-                rel_ab = sub[a][b].get('relation', '')
+                rel_ab = sub[a][b].get('raw_relation', sub[a][b].get('relation', ''))
                 successors_b = sub.successors(b) if sub.is_directed() else sub.neighbors(b)
                 for c in successors_b:
                     if c == a:
                         continue
-                    rel_bc = sub[b][c].get('relation', '')
+                    rel_bc = sub[b][c].get('raw_relation', sub[b][c].get('relation', ''))
                     if rel_ab == rel_bc and rel_ab in _TRANSITIVE_RELATIONS:
                         cls = rel_ab if rel_ab in TRANSITIVE_CLASSES else "none"
                     else:
@@ -1257,7 +1257,7 @@ def generate_kg_consistency_task(
 
     if corrupted:
         isa_edges = [(u, v) for u, v, d in sub.edges(data=True)
-                     if d.get('relation') == 'IsA']
+                     if d.get('raw_relation', d.get('relation', '')) == 'IsA']
         if not isa_edges:
             corrupted = False
         else:
@@ -1326,10 +1326,10 @@ def generate_kg_analogy_task_v10(
 
     # Compute relation-type distribution overlap (Jaccard)
     rels_a = Counter(
-        data.get("relation", "RelatedTo") for _, _, data in sub_a.edges(data=True)
+        data.get("raw_relation", data.get("relation", "RelatedTo")) for _, _, data in sub_a.edges(data=True)
     )
     rels_b = Counter(
-        data.get("relation", "RelatedTo") for _, _, data in sub_b.edges(data=True)
+        data.get("raw_relation", data.get("relation", "RelatedTo")) for _, _, data in sub_b.edges(data=True)
     )
     all_rel_keys = set(rels_a.keys()) | set(rels_b.keys())
     if all_rel_keys:
@@ -1402,7 +1402,7 @@ def generate_kg_analogy_task_v10(
     for u, v, data in merged.edges(data=True):
         emb = torch.randn(embedding_dim) * 0.01
         weight = data.get("weight", 1.0)
-        relation = data.get("relation", "RelatedTo")
+        relation = data.get("raw_relation", data.get("relation", "RelatedTo"))
         emb[0] = weight / 10.0
         rel_idx = rel_to_idx.get(relation, rel_to_idx.get("RelatedTo", 0))
         if 1 + rel_idx < embedding_dim:
@@ -1464,12 +1464,12 @@ def generate_kg_causal_chain_task(
         for a in nodes:
             neighbors_a = list(sub.successors(a) if sub.is_directed() else sub.neighbors(a))
             for b in neighbors_a:
-                rel_ab = sub[a][b].get('relation', '')
+                rel_ab = sub[a][b].get('raw_relation', sub[a][b].get('relation', ''))
                 successors_b = list(sub.successors(b) if sub.is_directed() else sub.neighbors(b))
                 for c in successors_b:
                     if c == a:
                         continue
-                    rel_bc = sub[b][c].get('relation', '')
+                    rel_bc = sub[b][c].get('raw_relation', sub[b][c].get('relation', ''))
 
                     ab_causal = rel_ab in _CAUSAL_RELATIONS
                     bc_causal = rel_bc in _CAUSAL_RELATIONS
