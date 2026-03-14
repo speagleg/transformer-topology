@@ -689,6 +689,7 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
     phase_cfg = config.get(f'phase_{phase_name}', {})
     cal_loss_wt = phase_cfg.get('calibration_loss_weight', 0.0)
     eff_loss_wt = phase_cfg.get('efficiency_loss_weight', 0.0)
+    spectral_gap_weight = tc.get('spectral_gap_weight', 0.0)
 
     results = {}
     datasets = {}
@@ -894,6 +895,7 @@ def _run_phase(phase_name, tasks, model, config, device, pregen_dir,
                     calibration_loss_weight=cal_loss_wt,
                     efficiency_loss_weight=eff_loss_wt,
                     bridge_accumulation_steps=bridge_accumulation_steps,
+                    spectral_gap_weight=spectral_gap_weight,
                 )
             elif replay_samples:
                 # Replay with interleaving (sequential — replay mixes tasks)
@@ -1086,7 +1088,7 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
     # Build model -- use initial max_classes from the first task, will be rebuilt per-task
     initial_max_classes = get_max_classes(PHASE_A_TASKS[0])
     model = _build_model("hierarchical_llm", mc, initial_max_classes, device,
-                          wave_config=wc, llm_config=lc)
+                          wave_config=wc, llm_config=lc, training_config=tc)
     # Load pre-trained DSM weights if available (Track 1)
     pretrained_path = lc.get('pretrained_path')
     if pretrained_path and Path(pretrained_path).exists():
@@ -1279,9 +1281,24 @@ def run_curriculum(config_path: str = "config/dsm_training.yaml",
     # ---- Phase B: Semantic Integration ----
     if not skip_b:
         if is_v10:
+            # Ensure cross-modal modules are unfrozen for Phase B
+            # (needed when resuming with --resume-phase b, since the
+            # post-Phase-A unfreezing block is inside `if not skip_a`)
+            model.bypass_llm = False
+            for name, param in model.named_parameters():
+                if any(k in name for k in ('cross_attn', 'text_gnn',
+                                            'qwen_encoder', 'attention_readout')):
+                    param.requires_grad_(True)
+            if hasattr(model.executive_loop, 'gnn_executive'):
+                head = model.executive_loop.gnn_executive.control_head
+                if hasattr(head, 'fusion_weight_head'):
+                    head.fusion_weight_head.bias.data.fill_(0.0)  # sigmoid(0)=0.5
+                    head.fusion_weight_head.weight.requires_grad_(True)
+                    head.fusion_weight_head.bias.requires_grad_(True)
             print(f"\n{'=' * 72}")
             print("Phase B: v10 KG Reasoning (text + structural + 20% replay)")
             print(f"{'=' * 72}")
+            print(f"  v10: Unfroze cross-modal modules, fusion_weight→0.5")
 
             # Load ConceptNet graph for KG tasks
             cn_path = bc.get("conceptnet_path", "data/conceptnet/conceptnet_en.pkl")

@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 from src.benchmarks.run_comparison import _unpack_sample
 from src.training.focal_loss import focal_loss
+from src.training.spectral_reg import spectral_gap_loss, compute_batch_spectral_gap
 
 
 def graph_collate_fn(samples):
@@ -363,6 +364,7 @@ def train_epoch_batched(
     bridge_accumulation_steps=8,
     calibration_loss_weight=0.0,
     efficiency_loss_weight=0.0,
+    spectral_gap_weight: float = 0.0,
 ):
     """Training epoch with graph-level mini-batching.
 
@@ -458,6 +460,14 @@ def train_epoch_batched(
                 adj = model._last_adjacency.to(sf.device)
                 c_loss = contrastive_fn(sf, adj) * contrastive_weight
                 batch_loss = batch_loss + c_loss
+
+            # Spectral gap regularization
+            if spectral_gap_weight > 0 and valid_count > 0:
+                batch_ccs = [s[0] for s in samples]
+                gap = compute_batch_spectral_gap(batch_ccs)
+                if gap.item() > 0:
+                    sg_loss = spectral_gap_loss(gap) * spectral_gap_weight
+                    batch_loss = batch_loss + sg_loss
 
             # Metacognition auxiliary losses
             if valid_count > 0 and getattr(model, 'use_metacog', False):
