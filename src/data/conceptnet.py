@@ -26,66 +26,82 @@ from src.benchmarks.topological_tasks import auto_fill_triangles
 
 
 # ---------------------------------------------------------------------------
-# Relation taxonomy: 34 raw ConceptNet relations -> 10 categories
+# Relation taxonomy: 34 raw ConceptNet relations -> 16 categories
 # ---------------------------------------------------------------------------
 
 RELATION_CATEGORIES: list[str] = [
     "IsA",
-    "HasA",
-    "PartOf",
+    "FormOf",
+    "DerivedFrom",
+    "HasContext",
+    "Synonym",
+    "Antonym",
+    "RelatedTo",
     "UsedFor",
-    "CapableOf",
     "AtLocation",
+    "PartOf",
+    "HasSubevent",
+    "CapableOf",
     "Causes",
     "HasProperty",
-    "RelatedTo",
-    "Other",
+    "Desire",
+    "Negation",
 ]
 
 _RELATION_MAP: dict[str, str] = {
-    # IsA
+    # IsA — taxonomic/definitional
     "IsA": "IsA",
     "DefinedAs": "IsA",
     "MannerOf": "IsA",
     "InstanceOf": "IsA",
-    # HasA
-    "HasA": "HasA",
-    # PartOf
-    "PartOf": "PartOf",
-    "HasSubevent": "PartOf",
-    "HasFirstSubevent": "PartOf",
-    "HasLastSubevent": "PartOf",
-    "MadeOf": "PartOf",
-    # UsedFor
+    # FormOf — morphological inflection
+    "FormOf": "FormOf",
+    # DerivedFrom — etymological derivation
+    "DerivedFrom": "DerivedFrom",
+    "EtymologicallyDerivedFrom": "DerivedFrom",
+    "EtymologicallyRelatedTo": "DerivedFrom",
+    # HasContext — domain tagging
+    "HasContext": "HasContext",
+    # Synonym — same/similar meaning
+    "Synonym": "Synonym",
+    "SimilarTo": "Synonym",
+    # Antonym — opposite/different meaning
+    "Antonym": "Antonym",
+    "DistinctFrom": "Antonym",
+    # RelatedTo — generic association (catch-all)
+    "RelatedTo": "RelatedTo",
+    "SymbolOf": "RelatedTo",
+    # UsedFor — function/purpose
     "UsedFor": "UsedFor",
-    # CapableOf
-    "CapableOf": "CapableOf",
-    "ReceivesAction": "CapableOf",
-    "NotCapableOf": "CapableOf",
-    # AtLocation
+    # AtLocation — spatial
     "AtLocation": "AtLocation",
     "LocatedNear": "AtLocation",
-    # Causes
+    # PartOf — part-whole composition
+    "PartOf": "PartOf",
+    "HasA": "PartOf",
+    "MadeOf": "PartOf",
+    # HasSubevent — temporal/event decomposition
+    "HasSubevent": "HasSubevent",
+    "HasFirstSubevent": "HasSubevent",
+    "HasLastSubevent": "HasSubevent",
+    # CapableOf — ability/action capacity
+    "CapableOf": "CapableOf",
+    "ReceivesAction": "CapableOf",
+    # Causes — causal/conditional
     "Causes": "Causes",
     "HasPrerequisite": "Causes",
-    "MotivatedByGoal": "Causes",
     "CausesDesire": "Causes",
+    "Entails": "Causes",
     "CreatedBy": "Causes",
-    "Desires": "Causes",
-    "NotDesires": "Causes",
-    # HasProperty
+    # HasProperty — property attribution
     "HasProperty": "HasProperty",
-    "NotHasProperty": "HasProperty",
-    # RelatedTo
-    "RelatedTo": "RelatedTo",
-    "Synonym": "RelatedTo",
-    "Antonym": "RelatedTo",
-    "SimilarTo": "RelatedTo",
-    "DerivedFrom": "RelatedTo",
-    "EtymologicallyRelatedTo": "RelatedTo",
-    "FormOf": "RelatedTo",
-    "DistinctFrom": "RelatedTo",
-    "HasContext": "RelatedTo",
+    # Desire — motivation/wanting
+    "Desires": "Desire",
+    "MotivatedByGoal": "Desire",
+    # Negation — negated relations
+    "NotCapableOf": "Negation",
+    "NotHasProperty": "Negation",
+    "NotDesires": "Negation",
 }
 
 
@@ -95,15 +111,15 @@ _RELATION_MAP: dict[str, str] = {
 
 
 def categorize_relation(raw_rel: str) -> str:
-    """Map a raw ConceptNet relation name to one of 10 categories.
+    """Map a raw ConceptNet relation name to one of 16 categories.
 
     Args:
         raw_rel: Raw relation string, e.g. ``"IsA"`` or ``"MotivatedByGoal"``.
 
     Returns:
-        One of the 10 category strings from :data:`RELATION_CATEGORIES`.
+        One of the 16 category strings from :data:`RELATION_CATEGORIES`.
     """
-    return _RELATION_MAP.get(raw_rel, "Other")
+    return _RELATION_MAP.get(raw_rel, "RelatedTo")
 
 
 def concept_to_text(concept: str) -> str:
@@ -373,13 +389,13 @@ def conceptnet_subgraph_to_cc(
     for u, v, data in sub.edges(data=True):
         if u not in node_map or v not in node_map:
             continue
-        relation = data.get("relation", "Other")
+        relation = data.get("relation", "RelatedTo")
         weight = data.get("weight", 1.0)
 
         emb = torch.randn(embedding_dim) * 0.01
         emb[0] = weight / 10.0  # normalized weight
         # One-hot relation type in dims 1..n_rels
-        rel_idx = rel_to_idx.get(relation, rel_to_idx["Other"])
+        rel_idx = rel_to_idx.get(relation, rel_to_idx.get("RelatedTo", 0))
         if 1 + rel_idx < embedding_dim:
             emb[1:min(1 + n_rels, embedding_dim)] = 0.0
             emb[1 + rel_idx] = 1.0

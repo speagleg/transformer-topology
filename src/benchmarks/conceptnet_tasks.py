@@ -40,18 +40,24 @@ from src.data.conceptnet import (
 RELATION_CLASSES: list[str] = sorted(
     {
         "IsA",
-        "HasA",
-        "PartOf",
+        "FormOf",
+        "DerivedFrom",
+        "HasContext",
+        "Synonym",
+        "Antonym",
+        "RelatedTo",
         "UsedFor",
-        "CapableOf",
         "AtLocation",
+        "PartOf",
+        "HasSubevent",
+        "CapableOf",
         "Causes",
         "HasProperty",
-        "RelatedTo",
-        "Other",
+        "Desire",
+        "Negation",
     }
 )
-assert len(RELATION_CLASSES) == 10
+assert len(RELATION_CLASSES) == 16
 
 CONCEPT_CATEGORIES: list[str] = [
     "animal",
@@ -614,7 +620,7 @@ def generate_kg_relation_task(
 
     raw_rel = data.get("relation", data.get("raw_relation", "RelatedTo"))
     category = categorize_relation(raw_rel)
-    answer = RELATION_CLASSES.index(category) if category in RELATION_CLASSES else RELATION_CLASSES.index("Other")
+    answer = RELATION_CLASSES.index(category) if category in RELATION_CLASSES else RELATION_CLASSES.index("RelatedTo")
 
     cc, node_map, _ = conceptnet_subgraph_to_cc(sub, embedding_dim, node_list)
 
@@ -899,10 +905,10 @@ def generate_kg_analogy_task(
 
     # Compute relation overlap (Jaccard on the multiset of relation types)
     rels_a = set(
-        data.get("relation", "Other") for _, _, data in sub_a.edges(data=True)
+        data.get("relation", "RelatedTo") for _, _, data in sub_a.edges(data=True)
     )
     rels_b = set(
-        data.get("relation", "Other") for _, _, data in sub_b.edges(data=True)
+        data.get("relation", "RelatedTo") for _, _, data in sub_b.edges(data=True)
     )
 
     if rels_a or rels_b:
@@ -975,10 +981,10 @@ def generate_kg_analogy_task(
     for u, v, data in merged.edges(data=True):
         emb = torch.randn(embedding_dim) * 0.01
         weight = data.get("weight", 1.0)
-        relation = data.get("relation", "Other")
+        relation = data.get("relation", "RelatedTo")
         emb[0] = weight / 10.0
         # One-hot relation type in dims 1..n_rels
-        rel_idx = rel_to_idx.get(relation, rel_to_idx["Other"])
+        rel_idx = rel_to_idx.get(relation, rel_to_idx.get("RelatedTo", 0))
         if 1 + rel_idx < embedding_dim:
             emb[1:min(1 + n_rels, embedding_dim)] = 0.0
             emb[1 + rel_idx] = 1.0
@@ -1249,10 +1255,10 @@ def generate_kg_analogy_task_v10(
 
     # Compute relation-type distribution overlap (Jaccard)
     rels_a = Counter(
-        data.get("relation", "Other") for _, _, data in sub_a.edges(data=True)
+        data.get("relation", "RelatedTo") for _, _, data in sub_a.edges(data=True)
     )
     rels_b = Counter(
-        data.get("relation", "Other") for _, _, data in sub_b.edges(data=True)
+        data.get("relation", "RelatedTo") for _, _, data in sub_b.edges(data=True)
     )
     all_rel_keys = set(rels_a.keys()) | set(rels_b.keys())
     if all_rel_keys:
@@ -1325,9 +1331,9 @@ def generate_kg_analogy_task_v10(
     for u, v, data in merged.edges(data=True):
         emb = torch.randn(embedding_dim) * 0.01
         weight = data.get("weight", 1.0)
-        relation = data.get("relation", "Other")
+        relation = data.get("relation", "RelatedTo")
         emb[0] = weight / 10.0
-        rel_idx = rel_to_idx.get(relation, rel_to_idx["Other"])
+        rel_idx = rel_to_idx.get(relation, rel_to_idx.get("RelatedTo", 0))
         if 1 + rel_idx < embedding_dim:
             emb[1:min(1 + n_rels, embedding_dim)] = 0.0
             emb[1 + rel_idx] = 1.0

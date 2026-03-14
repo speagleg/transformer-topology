@@ -52,7 +52,7 @@ EMBEDDING_DIM = 16
 
 class TestConstants:
     def test_relation_classes_count(self):
-        assert len(RELATION_CLASSES) == 10
+        assert len(RELATION_CLASSES) == 16
 
     def test_concept_categories_count(self):
         assert len(CONCEPT_CATEGORIES) == 9
@@ -78,7 +78,7 @@ class TestKgRelation:
             _, _, _, answer, _ = generate_kg_relation_task(
                 G, EMBEDDING_DIM, min_nodes=4, max_nodes=12,
             )
-            assert 0 <= answer <= 9, f"answer {answer} out of range 0-9"
+            assert 0 <= answer <= 15, f"answer {answer} out of range 0-15"
 
     def test_kg_relation_types(self):
         G = _make_test_graph()
