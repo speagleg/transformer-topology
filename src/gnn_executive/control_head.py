@@ -48,12 +48,14 @@ class ControlHead(nn.Module):
 
     def __init__(self, embedding_dim: int, num_freqs: int, num_filters: int = 0,
                  use_topo_feedback: bool = False,
-                 use_embedding_topo_feedback: bool = False):
+                 use_embedding_topo_feedback: bool = False,
+                 fusion_weight_init: float = -1.0):
         super().__init__()
         self.num_freqs = num_freqs
         self.num_filters = num_filters
         self.use_topo_feedback = use_topo_feedback
         self.use_embedding_topo_feedback = use_embedding_topo_feedback
+        self._fusion_weight_init = fusion_weight_init
 
         # Shared trunk: pool → project
         # +1 for harmonic energy, +1 for log(N) size feature
@@ -87,7 +89,7 @@ class ControlHead(nn.Module):
 
         # Fusion weight: sigmoid scalar gating how much iteration 2 overrides iteration 1
         self.fusion_weight_head = nn.Linear(embedding_dim, 1)
-        nn.init.zeros_(self.fusion_weight_head.bias)  # sigmoid(0)=0.5
+        nn.init.constant_(self.fusion_weight_head.bias, self._fusion_weight_init)  # sigmoid(-1)≈0.27
 
         # Filter ensemble weights (only when multi-filter ensemble is active)
         if num_filters > 0:

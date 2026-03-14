@@ -46,8 +46,10 @@ def _resolve_device(tc: dict) -> torch.device:
 
 
 def _build_model(variant: str, mc: dict, max_classes: int, device: torch.device,
-                  wave_config: dict | None = None, llm_config: dict | None = None):
+                  wave_config: dict | None = None, llm_config: dict | None = None,
+                  training_config: dict | None = None):
     """Build a model for the given variant."""
+    tc = training_config or {}
     common = dict(
         embedding_dim=mc["embedding_dim"],
         gnn_hidden=mc["gnn_hidden"],
@@ -68,6 +70,7 @@ def _build_model(variant: str, mc: dict, max_classes: int, device: torch.device,
         use_multi_head_classifier=mc.get("use_multi_head_classifier", False),
         use_metacog=mc.get("use_metacog", False),
         use_dual_track=mc.get("use_dual_track", False),
+        fusion_weight_init=tc.get("fusion_weight_init", -1.0),
     )
 
     if variant == "symmetric":
@@ -75,7 +78,7 @@ def _build_model(variant: str, mc: dict, max_classes: int, device: torch.device,
         sym_common = {k: v for k, v in common.items()
                       if k not in ('use_topo_feedback', 'use_embedding_topo_feedback',
                                    'use_multi_head_classifier', 'use_metacog',
-                                   'use_dual_track')}
+                                   'use_dual_track', 'fusion_weight_init')}
         model = SymmetricMultiHopModel(**sym_common)
     elif variant == "hierarchical":
         model = HierarchicalMultiHopModel(

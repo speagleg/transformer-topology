@@ -58,7 +58,8 @@ class ExecutiveReasoningLoop(nn.Module):
                  use_embedding_topo_feedback: bool = False,
                  use_metacog: bool = False,
                  num_tasks: int = 19,
-                 use_dual_track: bool = False):
+                 use_dual_track: bool = False,
+                 fusion_weight_init: float = -1.0):
         super().__init__()
         self.max_iterations = max_iterations
         self.convergence_threshold = convergence_threshold
@@ -115,6 +116,7 @@ class ExecutiveReasoningLoop(nn.Module):
             use_embedding_topo_feedback=use_embedding_topo_feedback,
             use_metacog=use_metacog,
             num_tasks=num_tasks,
+            fusion_weight_init=fusion_weight_init,
         )
 
         self.tat = TopologyAwareTransformer(

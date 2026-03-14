@@ -86,7 +86,8 @@ class HierarchicalMultiHopModel(nn.Module):
                  use_embedding_topo_feedback=False,
                  use_multi_head_classifier=False,
                  use_metacog=False,
-                 use_dual_track=False):
+                 use_dual_track=False,
+                 fusion_weight_init: float = -1.0):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.use_llm = use_llm
@@ -133,6 +134,7 @@ class HierarchicalMultiHopModel(nn.Module):
             use_metacog=use_metacog,
             num_tasks=lc.get('num_tasks', 19) if use_metacog else 0,
             use_dual_track=use_dual_track,
+            fusion_weight_init=fusion_weight_init,
         )
 
         # v10 dual-track: QwenContextualEncoder + AttentionReadout
