@@ -379,8 +379,17 @@ class BenchmarkDataset:
 
     @classmethod
     def load(cls, path: str) -> "BenchmarkDataset":
-        """Load dataset from disk."""
+        """Load dataset from disk.
+
+        Handles both dict format (from .save()) and pickled object format
+        (from torch.save(ds, path)).
+        """
         data = torch.load(path, weights_only=False)
+        if isinstance(data, cls):
+            # Pickled BenchmarkDataset object
+            if not hasattr(data, '_indices'):
+                data._indices = None
+            return data
         obj = cls.__new__(cls)
         obj.samples = data["samples"]
         obj.task_type = data["task_type"]
