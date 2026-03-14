@@ -386,9 +386,9 @@ class BenchmarkDataset:
         """
         data = torch.load(path, weights_only=False)
         if isinstance(data, cls):
-            # Pickled BenchmarkDataset object
-            if not hasattr(data, '_indices'):
-                data._indices = None
+            # Pickled BenchmarkDataset object — always reset _indices
+            # to avoid stale shuffle state from the serialized object
+            data._indices = None
             return data
         obj = cls.__new__(cls)
         obj.samples = data["samples"]
