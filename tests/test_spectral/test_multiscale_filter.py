@@ -199,3 +199,45 @@ def test_multiscale_skip_l2():
     signal = cc.get_embeddings(0)
     out = msf(cc, signal, diffusion_time=torch.tensor(0.5))
     assert out.shape == signal.shape
+
+
+# ---------------------------------------------------------------------------
+# MultiFilterDynamics + use_multiscale tests
+# ---------------------------------------------------------------------------
+
+from src.wave.dynamics import MultiFilterDynamics
+
+
+def test_multifilter_with_multiscale():
+    cc = _make_cc_with_triangles(embedding_dim=32)
+    mfd = MultiFilterDynamics(
+        embedding_dim=32,
+        filter_types=["wave_cosine"],
+        use_multiscale=True,
+        include_identity=True,
+    )
+    signal = cc.get_embeddings(0)
+    dt = torch.tensor(0.5)
+    wd = torch.tensor(0.1)
+    out = mfd(cc, signal, dt, wd)
+    assert out.shape == signal.shape
+
+
+def test_multifilter_multiscale_num_paths():
+    mfd = MultiFilterDynamics(
+        embedding_dim=32,
+        filter_types=["chebyshev", "wave_cosine"],
+        use_multiscale=True,
+        include_identity=True,
+    )
+    assert mfd.num_filters == 3  # 2 multiscale filters + identity
+
+
+def test_multifilter_without_multiscale_unchanged():
+    """Verify default behavior is unchanged."""
+    mfd = MultiFilterDynamics(
+        embedding_dim=32,
+        filter_types=["wave_cosine"],
+        include_identity=True,
+    )
+    assert mfd.num_filters == 2  # 1 filter + identity
