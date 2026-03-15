@@ -129,3 +129,73 @@ class TestNodeTriangleIncidenceDevice:
         cc = _make_cc_with_triangles()
         I = cc.node_triangle_incidence()
         assert I.device.type == "cpu"
+
+
+# ---------------------------------------------------------------------------
+# MultiScaleLaplacianFilter tests
+# ---------------------------------------------------------------------------
+
+from src.spectral.multiscale_filter import MultiScaleLaplacianFilter
+
+
+def test_multiscale_filter_forward_shape():
+    cc = _make_cc_with_triangles(embedding_dim=32)
+    msf = MultiScaleLaplacianFilter(embedding_dim=32)
+    signal = cc.get_embeddings(0)
+    out = msf(cc, signal, diffusion_time=torch.tensor(0.5))
+    assert out.shape == signal.shape
+
+
+def test_multiscale_filter_no_triangles():
+    cc = CellComplex(embedding_dim=32)
+    for i in range(5):
+        cc.add_0_cell(torch.randn(32), cell_type="node")
+    cc.add_1_cell(0, 1, torch.randn(32), relation_type="edge")
+    cc.add_1_cell(1, 2, torch.randn(32), relation_type="edge")
+    msf = MultiScaleLaplacianFilter(embedding_dim=32)
+    signal = cc.get_embeddings(0)
+    out = msf(cc, signal, diffusion_time=torch.tensor(0.5))
+    assert out.shape == signal.shape
+
+
+def test_multiscale_filter_no_edges():
+    cc = CellComplex(embedding_dim=32)
+    for i in range(3):
+        cc.add_0_cell(torch.randn(32), cell_type="node")
+    msf = MultiScaleLaplacianFilter(embedding_dim=32)
+    signal = cc.get_embeddings(0)
+    out = msf(cc, signal, diffusion_time=torch.tensor(0.5))
+    assert out.shape == signal.shape
+
+
+def test_multiscale_gates_are_learnable():
+    msf = MultiScaleLaplacianFilter(embedding_dim=32)
+    param_names = [n for n, _ in msf.named_parameters()]
+    assert any("gate" in n for n in param_names)
+
+
+def test_multiscale_gradients_flow():
+    cc = _make_cc_with_triangles(embedding_dim=32)
+    msf = MultiScaleLaplacianFilter(embedding_dim=32)
+    signal = cc.get_embeddings(0).clone().requires_grad_(True)
+    out = msf(cc, signal, diffusion_time=torch.tensor(0.5))
+    out.sum().backward()
+    assert signal.grad is not None
+
+
+def test_multiscale_skip_l1():
+    cc = _make_cc_with_triangles(embedding_dim=32)
+    msf = MultiScaleLaplacianFilter(embedding_dim=32, skip_l1=True)
+    assert not hasattr(msf, 'filter_L1')
+    signal = cc.get_embeddings(0)
+    out = msf(cc, signal, diffusion_time=torch.tensor(0.5))
+    assert out.shape == signal.shape
+
+
+def test_multiscale_skip_l2():
+    cc = _make_cc_with_triangles(embedding_dim=32)
+    msf = MultiScaleLaplacianFilter(embedding_dim=32, skip_l2=True)
+    assert not hasattr(msf, 'filter_L2')
+    signal = cc.get_embeddings(0)
+    out = msf(cc, signal, diffusion_time=torch.tensor(0.5))
+    assert out.shape == signal.shape
