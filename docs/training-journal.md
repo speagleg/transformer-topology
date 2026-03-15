@@ -262,11 +262,16 @@ Training log: `data/v10_dual_track/training_v11.log`
 | 0 | 1.419 | 64.2% | **64.6%** | 0.513 | 1646s | 10.3× random (6.25%) — massive improvement over v10 |
 | 1 | 1.087 | 65.8% | **65.8%** | 0.513 | 1398s | |
 | 2 | 0.991 | 65.8% | **65.8%** | 0.516 | 1374s | |
+| 3 | 0.910 | 68.6% | **68.7%** | 0.516 | 1345s | |
+| 5 | 0.772 | 68.9% | **69.0%** | 0.517 | 1377s | |
+| 7 | 0.659 | 69.9% | **69.9%** | 0.517 | 1404s | Best |
+| 9 | 0.566 | 69.1% | 69.1% | 0.520 | 1615s | |
+| 11 | 0.485 | 68.9% | 68.9% | 0.521 | 1709s | Patience 4/15, possible plateau |
 
-**v11 vs v10 comparison (both at epoch 0):**
-- v11: 64.6% bal acc on 16 classes (10.3× random)
-- v10: 42.8% bal acc on 10 classes (4.3× random)
-- v10 plateau: 52.6% after 9 epochs
+**v11 vs v10 comparison:**
+- v11 best: **69.9% bal acc on 16 classes** (11.2× random) at epoch 7
+- v10 best: 52.6% bal acc on 10 classes (5.3× random) at epoch 9
+- v11 already surpassed v10's ceiling by epoch 0
 
 Every v11 change is contributing:
 - Cleaner 16-class taxonomy eliminates ambiguous groupings
@@ -274,14 +279,33 @@ Every v11 change is contributing:
 - Bidirectional cross-attention enriches both modalities
 - 64D embeddings double information capacity
 - Fusion weight init at 0.27 lets structure dominate early
+- fusion_weight growing slowly (0.51→0.52) — text increasingly contributing
+
+### Inverse Scaling Research (parallel workstream, March 14)
+
+While v11 trains, implemented the MultiScaleLaplacianFilter architecture and preliminary experiments for the inverse scaling investigation:
+
+**Architecture (3 commits):**
+1. `node_triangle_incidence()` on CellComplex — containment matrix for triangle→node projection (can't use B1@B2 because ∂²=0)
+2. `MultiScaleLaplacianFilter` — parallel L0/L1/L2 spectral filtering with gated fusion, skip_l1/skip_l2 for ablations
+3. Wired into `MultiFilterDynamics` via `use_multiscale=True` flag
+
+**Preliminary findings (Exp 0a/0b):**
+- **Curl class imbalance confirmed**: At n=20, curl is only 15% of samples (should be 33%). At n=40, only 4.5%. Small graphs lack triangles, so `generate_hodge_class_task` falls back to gradient. This is a confound for the inverse scaling claim.
+- **Exact decomposition baseline**: 97.5% accuracy at n=20 — the math works fine, the model just can't learn to read it from node embeddings alone.
+
+**Plan**: `docs/plans/2026-03-14-inverse-scaling-implementation.md` (10 tasks, ~28 GPU hours)
 
 ### Status
-- [x] Implementation (13 commits, all tests passing)
+- [x] Implementation (17 commits, all tests passing)
 - [x] raw_relation fix across all KG task generators
-- [x] Dataset generation (Phase A + kg_relation done, other KG tasks generating)
+- [x] Dataset generation (Phase A + kg_relation done, other KG tasks in progress)
 - [x] PE precomputation (Phase A + kg_relation done)
 - [x] Phase A training (100% bfs, 49.3% hodge, 98.7% diverse)
-- [ ] Phase B KG training (kg_relation ep2: 65.8% bal acc, IN PROGRESS)
+- [x] MultiScaleLaplacianFilter architecture (L0/L1/L2)
+- [x] Inverse scaling preliminary experiments (0a/0b)
+- [ ] Phase B KG training (kg_relation ep11: 69.9% best bal acc, IN PROGRESS)
+- [ ] Inverse scaling GPU experiments (after v11 completes)
 - [ ] Results analysis
 
 ---
