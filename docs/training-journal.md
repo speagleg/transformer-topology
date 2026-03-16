@@ -296,17 +296,47 @@ While v11 trains, implemented the MultiScaleLaplacianFilter architecture and pre
 
 **Plan**: `docs/plans/2026-03-14-inverse-scaling-implementation.md` (10 tasks, ~28 GPU hours)
 
+### Experiment 1 Results: Baseline (L0 only, balanced data)
+
+**Training** (seed 42): 92.6% balanced accuracy at epoch 21 on n=16-32. Curl 89% — the 0% curl from Phase 4b was entirely a data balance issue.
+
+**OOD Evaluation (the inverse scaling test):**
+
+| Size | Bal Acc | Gradient | Curl | Harmonic | vs Phase 4b |
+|------|---------|----------|------|----------|-------------|
+| 20 (ID) | **94.8%** | 100% | 91% | 93% | Was 39% |
+| 40 (2×) | 71.6% | 75% | 44% | 95% | Was ~50% |
+| 80 (4×) | 44.1% | 33% | **0%** | 99% | Was ~71% |
+
+**CRITICAL FINDING: Phase 4b's "inverse scaling" was a data artifact.**
+
+The apparent accuracy improvement at larger graph sizes was caused by curl class imbalance: small graphs had few triangles → curl samples fell back to gradient → model couldn't detect curl at any size → at large sizes, triangles appeared naturally → curl class became detectable → accuracy "improved."
+
+With balanced data at all sizes:
+- Training: 92.6% (massive improvement from fixing curl balance)
+- OOD: **Normal degradation** (94.8% → 71.6% → 44.1%)
+- Curl collapses back to 0% at n=80 — the **architectural** curl blindness (L0-only processing) remains at OOD sizes
+- The model overfits to small-graph spectral signatures
+
+**Implications:**
+1. The "inverse scaling" paper angle is invalidated
+2. The curl problem has two layers: data (fixed) + architecture (needs L1/L2)
+3. MultiScaleLaplacianFilter (Exp 2a) is the real test — does L1 processing maintain curl at larger sizes?
+
+### Experiment 2a: MultiScale (L0+L1+L2) — IN PROGRESS
+
+Training launched. This is the key test: does L1 Laplacian processing fix curl degradation at OOD sizes?
+
 ### Status
-- [x] Implementation (17 commits, all tests passing)
+- [x] Implementation (20+ commits, all tests passing)
 - [x] raw_relation fix across all KG task generators
-- [x] Dataset generation (Phase A + kg_relation done, other KG tasks in progress)
-- [x] PE precomputation (Phase A + kg_relation done)
 - [x] Phase A training (100% bfs, 49.3% hodge, 98.7% diverse)
+- [x] Phase B kg_relation: **69.9% bal acc on 16 classes** (v10 was 52.6% on 10 classes)
 - [x] MultiScaleLaplacianFilter architecture (L0/L1/L2)
-- [x] Inverse scaling preliminary experiments (0a/0b)
-- [ ] Phase B KG training (kg_relation ep11: 69.9% best bal acc, IN PROGRESS)
-- [ ] Inverse scaling GPU experiments (after v11 completes)
-- [ ] Results analysis
+- [x] Exp 0a/0b (class balance audit + exact baseline)
+- [x] Exp 1 baseline: 92.6% train, normal OOD degradation (inverse scaling debunked)
+- [ ] Exp 2a multiscale: training in progress
+- [ ] Project direction recalibration needed
 
 ---
 
