@@ -323,20 +323,53 @@ With balanced data at all sizes:
 2. The curl problem has two layers: data (fixed) + architecture (needs L1/L2)
 3. MultiScaleLaplacianFilter (Exp 2a) is the real test — does L1 processing maintain curl at larger sizes?
 
-### Experiment 2a: MultiScale (L0+L1+L2) — IN PROGRESS
+### Experiment 2a: MultiScale (L0+L1+L2) — Partial (killed for recalibration)
 
-Training launched. This is the key test: does L1 Laplacian processing fix curl degradation at OOD sizes?
+| Ep | Loss | Bal Acc | Gradient | Curl | Harmonic | Time |
+|----|------|---------|----------|------|----------|------|
+| 0 | 0.931 | 54.7% | 58% | 36% | 70% | 1808s |
 
-### Status
-- [x] Implementation (20+ commits, all tests passing)
-- [x] raw_relation fix across all KG task generators
-- [x] Phase A training (100% bfs, 49.3% hodge, 98.7% diverse)
-- [x] Phase B kg_relation: **69.9% bal acc on 16 classes** (v10 was 52.6% on 10 classes)
-- [x] MultiScaleLaplacianFilter architecture (L0/L1/L2)
-- [x] Exp 0a/0b (class balance audit + exact baseline)
-- [x] Exp 1 baseline: 92.6% train, normal OOD degradation (inverse scaling debunked)
-- [ ] Exp 2a multiscale: training in progress
-- [ ] Project direction recalibration needed
+Killed after 1 epoch to recalibrate project direction. The 1808s/epoch (4× baseline) reflects the cost of L1/L2 eigendecompositions. Curl at 36% on epoch 0 (vs baseline's 47% on epoch 0) — the L1/L2 paths were still randomly initialized. Inconclusive on whether L1 fixes OOD curl. Architecture is built and ready to resume.
+
+### v11 Session Summary (March 14-16, 2026)
+
+**What worked:**
+- 16-class taxonomy + text in classifier + bidirectional cross-attention + 64D → **69.9% bal acc** on kg_relation (v10 was 52.6% on 10 classes)
+- Balanced curl sampling: 0% → 91% curl detection at training size
+- MultiScaleLaplacianFilter architecture: clean L0/L1/L2 parallel processing with gated fusion
+
+**What we learned:**
+- Phase 4b's "inverse scaling" (39%→71%) was a **data artifact** from curl class imbalance, not a real property of the spectral architecture
+- Curl blindness has two distinct layers: (1) data imbalance at small sizes — **fixed**, (2) L0-only processing can't generalize curl to OOD sizes — **needs L1/L2**
+- Normal OOD degradation (94.8%→44.1%) when data is properly balanced
+- The remaining 4 KG tasks (transitive, consistency, analogy, causal_chain) had unbalanced sampling — **fixed** but not retrained
+
+**Compute spent:** ~$80-100 on vast.ai RTX 4090 over 3 days
+
+**What's built and ready:**
+- v11 architecture (branch `v11-taxonomy-text-classifier`, 23 commits, pushed to GitHub)
+- MultiScaleLaplacianFilter wired into MultiFilterDynamics
+- Full experiment infrastructure (train.py, evaluate_ood.py, 10 configs)
+- Balanced sampling for hodge_class and all KG tasks
+- v11 kg_relation checkpoint (69.9% bal acc)
+
+**Open questions for recalibration:**
+1. Is KG relation classification the right task for this architecture, or is the topology machinery overkill?
+2. The text path (Qwen encoder + cross-attention) provides most of the v11 improvement — what's the topology actually contributing?
+3. Should we pivot to tasks where topology is the primary signal (mesh analysis, network flow, molecular graphs)?
+4. The sheaf diffusion results (104% retention) were also measured with imbalanced data — are they real?
+5. What's the publishable finding? Curl fix? Multi-scale Hodge? Or something else entirely?
+
+### Status (paused)
+- [x] v11 implementation (23 commits, all tests passing, pushed to GitHub)
+- [x] v11 kg_relation: **69.9% bal acc** on 16 classes
+- [x] Inverse scaling investigation: **debunked** (data artifact)
+- [x] MultiScaleLaplacianFilter: built, wired, ready
+- [x] Curl balance fix: data layer solved, architecture layer built but untested at scale
+- [x] All data/logs pulled from instance
+- [ ] Exp 2a (multiscale OOD): incomplete — need GPU time
+- [ ] Project direction recalibration
+- [ ] vast.ai instance: **paused**
 
 ---
 
