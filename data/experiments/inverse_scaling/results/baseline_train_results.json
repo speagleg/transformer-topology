@@ -1,0 +1,918 @@
+{
+  "experiment": "baseline",
+  "config_path": "scripts/experiments/inverse_scaling/configs/baseline.yaml",
+  "results": [
+    {
+      "seed": 42,
+      "best_val_acc": 0.928,
+      "best_val_bal_acc": 0.9263,
+      "best_train_loss": 0.3525,
+      "best_epoch": 21,
+      "total_epochs": 30,
+      "params": 626867,
+      "checkpoint_path": "data/experiments/inverse_scaling/checkpoints/baseline_seed42_best.pt",
+      "training_curve": [
+        {
+          "epoch": 0,
+          "train_loss": 0.94875,
+          "val_loss": 0.83941,
+          "val_acc": 0.63,
+          "val_bal_acc": 0.6149,
+          "grad_norm": 2.8356,
+          "lr": 0.0003,
+          "time": 427.5,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 93,
+              "total": 174,
+              "accuracy": 0.5345
+            },
+            "1": {
+              "name": "curl",
+              "correct": 66,
+              "total": 140,
+              "accuracy": 0.4714
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 156,
+              "total": 186,
+              "accuracy": 0.8387
+            }
+          }
+        },
+        {
+          "epoch": 1,
+          "train_loss": 0.69744,
+          "val_loss": 0.69955,
+          "val_acc": 0.688,
+          "val_bal_acc": 0.6794,
+          "grad_norm": 3.2332,
+          "lr": 0.0003,
+          "time": 423.4,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 99,
+              "total": 174,
+              "accuracy": 0.569
+            },
+            "1": {
+              "name": "curl",
+              "correct": 86,
+              "total": 140,
+              "accuracy": 0.6143
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 159,
+              "total": 186,
+              "accuracy": 0.8548
+            }
+          }
+        },
+        {
+          "epoch": 2,
+          "train_loss": 0.65283,
+          "val_loss": 0.65418,
+          "val_acc": 0.742,
+          "val_bal_acc": 0.7369,
+          "grad_norm": 2.8896,
+          "lr": 0.0003,
+          "time": 428.0,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 111,
+              "total": 174,
+              "accuracy": 0.6379
+            },
+            "1": {
+              "name": "curl",
+              "correct": 99,
+              "total": 140,
+              "accuracy": 0.7071
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 161,
+              "total": 186,
+              "accuracy": 0.8656
+            }
+          }
+        },
+        {
+          "epoch": 3,
+          "train_loss": 0.64665,
+          "val_loss": 0.87515,
+          "val_acc": 0.662,
+          "val_bal_acc": 0.6269,
+          "grad_norm": 2.5708,
+          "lr": 0.0003,
+          "time": 435.9,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 163,
+              "total": 174,
+              "accuracy": 0.9368
+            },
+            "1": {
+              "name": "curl",
+              "correct": 23,
+              "total": 140,
+              "accuracy": 0.1643
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 145,
+              "total": 186,
+              "accuracy": 0.7796
+            }
+          }
+        },
+        {
+          "epoch": 4,
+          "train_loss": 0.65564,
+          "val_loss": 0.66048,
+          "val_acc": 0.704,
+          "val_bal_acc": 0.6919,
+          "grad_norm": 2.8069,
+          "lr": 0.0003,
+          "time": 443.5,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 99,
+              "total": 174,
+              "accuracy": 0.569
+            },
+            "1": {
+              "name": "curl",
+              "correct": 83,
+              "total": 140,
+              "accuracy": 0.5929
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 170,
+              "total": 186,
+              "accuracy": 0.914
+            }
+          }
+        },
+        {
+          "epoch": 5,
+          "train_loss": 0.63697,
+          "val_loss": 0.65932,
+          "val_acc": 0.702,
+          "val_bal_acc": 0.684,
+          "grad_norm": 2.6572,
+          "lr": 0.0003,
+          "time": 455.7,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 121,
+              "total": 174,
+              "accuracy": 0.6954
+            },
+            "1": {
+              "name": "curl",
+              "correct": 68,
+              "total": 140,
+              "accuracy": 0.4857
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 162,
+              "total": 186,
+              "accuracy": 0.871
+            }
+          }
+        },
+        {
+          "epoch": 6,
+          "train_loss": 0.62565,
+          "val_loss": 0.67806,
+          "val_acc": 0.738,
+          "val_bal_acc": 0.7381,
+          "grad_norm": 2.6751,
+          "lr": 0.0003,
+          "time": 503.1,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 102,
+              "total": 174,
+              "accuracy": 0.5862
+            },
+            "1": {
+              "name": "curl",
+              "correct": 109,
+              "total": 140,
+              "accuracy": 0.7786
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 158,
+              "total": 186,
+              "accuracy": 0.8495
+            }
+          }
+        },
+        {
+          "epoch": 7,
+          "train_loss": 0.60244,
+          "val_loss": 0.68609,
+          "val_acc": 0.722,
+          "val_bal_acc": 0.7116,
+          "grad_norm": 2.8173,
+          "lr": 0.00015,
+          "time": 506.9,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 94,
+              "total": 174,
+              "accuracy": 0.5402
+            },
+            "1": {
+              "name": "curl",
+              "correct": 90,
+              "total": 140,
+              "accuracy": 0.6429
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 177,
+              "total": 186,
+              "accuracy": 0.9516
+            }
+          }
+        },
+        {
+          "epoch": 8,
+          "train_loss": 0.58957,
+          "val_loss": 0.67391,
+          "val_acc": 0.734,
+          "val_bal_acc": 0.7292,
+          "grad_norm": 3.8065,
+          "lr": 0.00015,
+          "time": 507.3,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 107,
+              "total": 174,
+              "accuracy": 0.6149
+            },
+            "1": {
+              "name": "curl",
+              "correct": 99,
+              "total": 140,
+              "accuracy": 0.7071
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 161,
+              "total": 186,
+              "accuracy": 0.8656
+            }
+          }
+        },
+        {
+          "epoch": 9,
+          "train_loss": 0.57317,
+          "val_loss": 0.75347,
+          "val_acc": 0.746,
+          "val_bal_acc": 0.7341,
+          "grad_norm": 5.8008,
+          "lr": 0.00015,
+          "time": 507.6,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 131,
+              "total": 174,
+              "accuracy": 0.7529
+            },
+            "1": {
+              "name": "curl",
+              "correct": 84,
+              "total": 140,
+              "accuracy": 0.6
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 158,
+              "total": 186,
+              "accuracy": 0.8495
+            }
+          }
+        },
+        {
+          "epoch": 10,
+          "train_loss": 0.53042,
+          "val_loss": 0.57137,
+          "val_acc": 0.824,
+          "val_bal_acc": 0.8229,
+          "grad_norm": 9.665,
+          "lr": 0.00015,
+          "time": 498.8,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 141,
+              "total": 174,
+              "accuracy": 0.8103
+            },
+            "1": {
+              "name": "curl",
+              "correct": 114,
+              "total": 140,
+              "accuracy": 0.8143
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 157,
+              "total": 186,
+              "accuracy": 0.8441
+            }
+          }
+        },
+        {
+          "epoch": 11,
+          "train_loss": 0.45372,
+          "val_loss": 0.48757,
+          "val_acc": 0.882,
+          "val_bal_acc": 0.8783,
+          "grad_norm": 11.9557,
+          "lr": 0.00015,
+          "time": 501.3,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 164,
+              "total": 174,
+              "accuracy": 0.9425
+            },
+            "1": {
+              "name": "curl",
+              "correct": 115,
+              "total": 140,
+              "accuracy": 0.8214
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 162,
+              "total": 186,
+              "accuracy": 0.871
+            }
+          }
+        },
+        {
+          "epoch": 12,
+          "train_loss": 0.42148,
+          "val_loss": 0.47504,
+          "val_acc": 0.904,
+          "val_bal_acc": 0.9039,
+          "grad_norm": 12.1862,
+          "lr": 0.00015,
+          "time": 496.6,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 164,
+              "total": 174,
+              "accuracy": 0.9425
+            },
+            "1": {
+              "name": "curl",
+              "correct": 125,
+              "total": 140,
+              "accuracy": 0.8929
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 163,
+              "total": 186,
+              "accuracy": 0.8763
+            }
+          }
+        },
+        {
+          "epoch": 13,
+          "train_loss": 0.39842,
+          "val_loss": 0.47082,
+          "val_acc": 0.904,
+          "val_bal_acc": 0.9023,
+          "grad_norm": 10.309,
+          "lr": 0.00015,
+          "time": 499.2,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 170,
+              "total": 174,
+              "accuracy": 0.977
+            },
+            "1": {
+              "name": "curl",
+              "correct": 121,
+              "total": 140,
+              "accuracy": 0.8643
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 161,
+              "total": 186,
+              "accuracy": 0.8656
+            }
+          }
+        },
+        {
+          "epoch": 14,
+          "train_loss": 0.39049,
+          "val_loss": 0.50743,
+          "val_acc": 0.882,
+          "val_bal_acc": 0.8758,
+          "grad_norm": 10.3405,
+          "lr": 0.00015,
+          "time": 496.5,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 172,
+              "total": 174,
+              "accuracy": 0.9885
+            },
+            "1": {
+              "name": "curl",
+              "correct": 109,
+              "total": 140,
+              "accuracy": 0.7786
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 160,
+              "total": 186,
+              "accuracy": 0.8602
+            }
+          }
+        },
+        {
+          "epoch": 15,
+          "train_loss": 0.38266,
+          "val_loss": 0.46469,
+          "val_acc": 0.914,
+          "val_bal_acc": 0.9188,
+          "grad_norm": 9.2303,
+          "lr": 0.00015,
+          "time": 506.1,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 169,
+              "total": 174,
+              "accuracy": 0.9713
+            },
+            "1": {
+              "name": "curl",
+              "correct": 134,
+              "total": 140,
+              "accuracy": 0.9571
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 154,
+              "total": 186,
+              "accuracy": 0.828
+            }
+          }
+        },
+        {
+          "epoch": 16,
+          "train_loss": 0.36896,
+          "val_loss": 0.43706,
+          "val_acc": 0.914,
+          "val_bal_acc": 0.9116,
+          "grad_norm": 8.9958,
+          "lr": 0.00015,
+          "time": 487.2,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 168,
+              "total": 174,
+              "accuracy": 0.9655
+            },
+            "1": {
+              "name": "curl",
+              "correct": 122,
+              "total": 140,
+              "accuracy": 0.8714
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 167,
+              "total": 186,
+              "accuracy": 0.8978
+            }
+          }
+        },
+        {
+          "epoch": 17,
+          "train_loss": 0.36856,
+          "val_loss": 0.42991,
+          "val_acc": 0.922,
+          "val_bal_acc": 0.9178,
+          "grad_norm": 9.5917,
+          "lr": 0.00015,
+          "time": 464.6,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 170,
+              "total": 174,
+              "accuracy": 0.977
+            },
+            "1": {
+              "name": "curl",
+              "correct": 120,
+              "total": 140,
+              "accuracy": 0.8571
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 171,
+              "total": 186,
+              "accuracy": 0.9194
+            }
+          }
+        },
+        {
+          "epoch": 18,
+          "train_loss": 0.35839,
+          "val_loss": 0.47896,
+          "val_acc": 0.92,
+          "val_bal_acc": 0.9235,
+          "grad_norm": 7.7633,
+          "lr": 0.00015,
+          "time": 430.3,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 168,
+              "total": 174,
+              "accuracy": 0.9655
+            },
+            "1": {
+              "name": "curl",
+              "correct": 133,
+              "total": 140,
+              "accuracy": 0.95
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 159,
+              "total": 186,
+              "accuracy": 0.8548
+            }
+          }
+        },
+        {
+          "epoch": 19,
+          "train_loss": 0.35267,
+          "val_loss": 0.47154,
+          "val_acc": 0.918,
+          "val_bal_acc": 0.9206,
+          "grad_norm": 8.1603,
+          "lr": 0.00015,
+          "time": 444.6,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 174,
+              "total": 174,
+              "accuracy": 1.0
+            },
+            "1": {
+              "name": "curl",
+              "correct": 130,
+              "total": 140,
+              "accuracy": 0.9286
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 155,
+              "total": 186,
+              "accuracy": 0.8333
+            }
+          }
+        },
+        {
+          "epoch": 20,
+          "train_loss": 0.35046,
+          "val_loss": 0.41838,
+          "val_acc": 0.924,
+          "val_bal_acc": 0.9221,
+          "grad_norm": 7.9991,
+          "lr": 0.00015,
+          "time": 432.3,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 171,
+              "total": 174,
+              "accuracy": 0.9828
+            },
+            "1": {
+              "name": "curl",
+              "correct": 124,
+              "total": 140,
+              "accuracy": 0.8857
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 167,
+              "total": 186,
+              "accuracy": 0.8978
+            }
+          }
+        },
+        {
+          "epoch": 21,
+          "train_loss": 0.3525,
+          "val_loss": 0.4432,
+          "val_acc": 0.928,
+          "val_bal_acc": 0.9263,
+          "grad_norm": 8.1044,
+          "lr": 0.00015,
+          "time": 435.0,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 171,
+              "total": 174,
+              "accuracy": 0.9828
+            },
+            "1": {
+              "name": "curl",
+              "correct": 125,
+              "total": 140,
+              "accuracy": 0.8929
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 168,
+              "total": 186,
+              "accuracy": 0.9032
+            }
+          }
+        },
+        {
+          "epoch": 22,
+          "train_loss": 0.33968,
+          "val_loss": 0.44868,
+          "val_acc": 0.912,
+          "val_bal_acc": 0.9075,
+          "grad_norm": 7.0323,
+          "lr": 0.00015,
+          "time": 441.1,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 168,
+              "total": 174,
+              "accuracy": 0.9655
+            },
+            "1": {
+              "name": "curl",
+              "correct": 118,
+              "total": 140,
+              "accuracy": 0.8429
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 170,
+              "total": 186,
+              "accuracy": 0.914
+            }
+          }
+        },
+        {
+          "epoch": 23,
+          "train_loss": 0.33433,
+          "val_loss": 0.46525,
+          "val_acc": 0.91,
+          "val_bal_acc": 0.9049,
+          "grad_norm": 6.6189,
+          "lr": 0.00015,
+          "time": 440.8,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 167,
+              "total": 174,
+              "accuracy": 0.9598
+            },
+            "1": {
+              "name": "curl",
+              "correct": 117,
+              "total": 140,
+              "accuracy": 0.8357
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 171,
+              "total": 186,
+              "accuracy": 0.9194
+            }
+          }
+        },
+        {
+          "epoch": 24,
+          "train_loss": 0.33698,
+          "val_loss": 0.43734,
+          "val_acc": 0.924,
+          "val_bal_acc": 0.92,
+          "grad_norm": 8.2571,
+          "lr": 0.00015,
+          "time": 456.3,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 168,
+              "total": 174,
+              "accuracy": 0.9655
+            },
+            "1": {
+              "name": "curl",
+              "correct": 121,
+              "total": 140,
+              "accuracy": 0.8643
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 173,
+              "total": 186,
+              "accuracy": 0.9301
+            }
+          }
+        },
+        {
+          "epoch": 25,
+          "train_loss": 0.31797,
+          "val_loss": 0.44915,
+          "val_acc": 0.918,
+          "val_bal_acc": 0.9135,
+          "grad_norm": 4.1817,
+          "lr": 7.5e-05,
+          "time": 456.2,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 169,
+              "total": 174,
+              "accuracy": 0.9713
+            },
+            "1": {
+              "name": "curl",
+              "correct": 119,
+              "total": 140,
+              "accuracy": 0.85
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 171,
+              "total": 186,
+              "accuracy": 0.9194
+            }
+          }
+        },
+        {
+          "epoch": 26,
+          "train_loss": 0.31517,
+          "val_loss": 0.44684,
+          "val_acc": 0.926,
+          "val_bal_acc": 0.9254,
+          "grad_norm": 3.9681,
+          "lr": 7.5e-05,
+          "time": 466.2,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 169,
+              "total": 174,
+              "accuracy": 0.9713
+            },
+            "1": {
+              "name": "curl",
+              "correct": 127,
+              "total": 140,
+              "accuracy": 0.9071
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 167,
+              "total": 186,
+              "accuracy": 0.8978
+            }
+          }
+        },
+        {
+          "epoch": 27,
+          "train_loss": 0.31369,
+          "val_loss": 0.44421,
+          "val_acc": 0.924,
+          "val_bal_acc": 0.922,
+          "grad_norm": 3.969,
+          "lr": 7.5e-05,
+          "time": 427.3,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 170,
+              "total": 174,
+              "accuracy": 0.977
+            },
+            "1": {
+              "name": "curl",
+              "correct": 124,
+              "total": 140,
+              "accuracy": 0.8857
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 168,
+              "total": 186,
+              "accuracy": 0.9032
+            }
+          }
+        },
+        {
+          "epoch": 28,
+          "train_loss": 0.31273,
+          "val_loss": 0.4543,
+          "val_acc": 0.918,
+          "val_bal_acc": 0.9168,
+          "grad_norm": 4.2971,
+          "lr": 7.5e-05,
+          "time": 429.7,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 167,
+              "total": 174,
+              "accuracy": 0.9598
+            },
+            "1": {
+              "name": "curl",
+              "correct": 125,
+              "total": 140,
+              "accuracy": 0.8929
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 167,
+              "total": 186,
+              "accuracy": 0.8978
+            }
+          }
+        },
+        {
+          "epoch": 29,
+          "train_loss": 0.30632,
+          "val_loss": 0.47357,
+          "val_acc": 0.922,
+          "val_bal_acc": 0.9177,
+          "grad_norm": 2.7664,
+          "lr": 3.75e-05,
+          "time": 438.6,
+          "per_class": {
+            "0": {
+              "name": "gradient",
+              "correct": 169,
+              "total": 174,
+              "accuracy": 0.9713
+            },
+            "1": {
+              "name": "curl",
+              "correct": 120,
+              "total": 140,
+              "accuracy": 0.8571
+            },
+            "2": {
+              "name": "harmonic",
+              "correct": 172,
+              "total": 186,
+              "accuracy": 0.9247
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

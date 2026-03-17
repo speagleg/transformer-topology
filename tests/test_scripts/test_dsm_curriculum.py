@@ -262,7 +262,8 @@ class TestV10ModelBuild:
         assert model.attention_readout is not None
         assert model.topo_bridge is None
         assert model.executive_loop.use_dual_track is True
-        assert model.classifier_input_dim == 101
+        # 3*32 + 4 + 1 + 2*32 = 165 (text_dim=embedding_dim now)
+        assert model.classifier_input_dim == 165
 
     def test_v10_forward_pass(self):
         from src.benchmarks.run_benchmark_suite import _build_model

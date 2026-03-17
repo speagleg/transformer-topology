@@ -383,6 +383,32 @@ class CellComplex:
             W[t, s] = w
         return W
 
+    def node_triangle_incidence(self) -> torch.Tensor:
+        """Return the node-triangle incidence matrix I of shape (num_0_cells, num_2_cells).
+
+        Entry I[n, t] = 1.0 if node n is a vertex of triangle t, else 0.0.
+
+        2-cells store their boundary as *edge* indices (not node indices), so we
+        resolve through the edge source/target lists to recover the vertex set of
+        each triangle.
+
+        Returns:
+            Float tensor of shape (N, T) where N = num_0_cells, T = num_2_cells.
+            If T == 0 the returned tensor has shape (N, 0).
+        """
+        n_nodes = self.num_cells(0)
+        n_triangles = self.num_cells(2)
+        I_nt = torch.zeros(n_nodes, n_triangles, dtype=torch.float32, device=self.device)
+        for t_idx, boundary_edges in enumerate(self._2_cell_boundaries):
+            nodes: set[int] = set()
+            for e_idx in boundary_edges:
+                nodes.add(self._1_cell_sources[e_idx])
+                nodes.add(self._1_cell_targets[e_idx])
+            for node_idx in nodes:
+                if node_idx < n_nodes:
+                    I_nt[node_idx, t_idx] = 1.0
+        return I_nt
+
     def edge_index(self) -> torch.Tensor:
         """Return PyG-compatible edge_index tensor (2, 2*num_edges) for undirected graph."""
         self._ensure_caches()

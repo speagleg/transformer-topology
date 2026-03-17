@@ -298,6 +298,7 @@ class MultiFilterDynamics(nn.Module):
         include_sheaf: bool = False,
         use_wave_strength_gate: bool = False,
         use_neural_ode: bool = False,
+        use_multiscale: bool = False,
         **filter_kwargs,
     ):
         super().__init__()
@@ -306,10 +307,17 @@ class MultiFilterDynamics(nn.Module):
         self.use_wave_strength_gate = use_wave_strength_gate
         self.use_neural_ode = use_neural_ode
 
-        self.filters = nn.ModuleList([
-            create_spectral_filter(ft, dim=laplacian_dim, **filter_kwargs)
-            for ft in filter_types
-        ])
+        if use_multiscale:
+            from src.spectral.multiscale_filter import MultiScaleLaplacianFilter
+            self.filters = nn.ModuleList([
+                MultiScaleLaplacianFilter(embedding_dim, filter_type=ft, **filter_kwargs)
+                for ft in filter_types
+            ])
+        else:
+            self.filters = nn.ModuleList([
+                create_spectral_filter(ft, dim=laplacian_dim, **filter_kwargs)
+                for ft in filter_types
+            ])
 
         # Sheaf diffusion as a special ensemble path (learnable restriction maps,
         # different mechanism from SpectralFilter but same forward interface).

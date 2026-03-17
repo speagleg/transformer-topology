@@ -33,3 +33,28 @@ class CrossAttentionBlock(nn.Module):
         attn_out = attn_out.squeeze(0)  # (N, d)
 
         return self.norm(h_struct + attn_out)
+
+
+class BidirectionalCrossAttention(nn.Module):
+    """Bidirectional cross-attention between structural and text embeddings.
+
+    Direction 1 (s→t): structural queries attend to text keys/values.
+    Direction 2 (t→s): text queries attend to structural keys/values.
+
+    Returns both enriched representations.
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.s2t = CrossAttentionBlock(embed_dim, num_heads, dropout)
+        self.t2s = CrossAttentionBlock(embed_dim, num_heads, dropout)
+
+    def forward(
+        self,
+        h_struct: torch.Tensor,
+        h_text: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (h_struct_enriched, h_text_enriched)."""
+        h_struct_enriched = self.s2t(h_struct, h_text)
+        h_text_enriched = self.t2s(h_text, h_struct)
+        return h_struct_enriched, h_text_enriched

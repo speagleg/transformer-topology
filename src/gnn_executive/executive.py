@@ -24,7 +24,8 @@ class GNNExecutive(nn.Module):
                  use_topo_feedback: bool = False,
                  use_embedding_topo_feedback: bool = False,
                  use_metacog: bool = False,
-                 num_tasks: int = 19):
+                 num_tasks: int = 19,
+                 fusion_weight_init: float = -1.0):
         super().__init__()
         self.use_higher_order = use_higher_order
         self.produce_control_signals = produce_control_signals
@@ -68,6 +69,7 @@ class GNNExecutive(nn.Module):
                     num_filters=num_filters,
                     use_topo_feedback=use_topo_feedback,
                     use_embedding_topo_feedback=use_embedding_topo_feedback,
+                    fusion_weight_init=fusion_weight_init,
                 )
 
     def forward(self, cc: CellComplex) -> tuple[torch.Tensor, torch.Tensor | None]:

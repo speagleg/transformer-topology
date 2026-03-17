@@ -1,0 +1,50 @@
+experiment:
+  name: ablation_no_tat
+  task: hodge_class
+  seeds: [42, 123, 456]
+  epochs: 30
+  patience: 15
+
+model:
+  embedding_dim: 64
+  gnn_hidden: 128
+  gnn_spatial_layers: 2
+  gnn_spectral_layers: 2
+  max_freqs: 16
+  tat_layers: 0
+  tat_spatial_heads: 4
+  tat_spectral_heads: 4
+  tat_ff_dim: 256
+  max_iterations: 2
+  convergence_threshold: 0.05
+  use_higher_order: true
+  use_topological_pe: true
+  use_structural_features: true
+  use_wave_dynamics: true
+  use_topo_feedback: true
+  use_embedding_topo_feedback: true
+  use_dual_track: false
+  use_multi_head_classifier: false
+
+wave:
+  wave_mode: ensemble
+  filter_types: [chebyshev, wave_cosine, heat]
+  include_identity: true
+  wave_strength_gate: true
+  use_neural_ode: true
+  use_multiscale: false
+
+training:
+  train_n_min: 16
+  train_n_max: 32
+  train_samples: 5000
+  val_samples: 500
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  batch_size: 8
+  label_smoothing: 0.1
+  max_norm: 5.0
+
+output:
+  checkpoint_dir: data/experiments/inverse_scaling/checkpoints
+  results_dir: data/experiments/inverse_scaling/results

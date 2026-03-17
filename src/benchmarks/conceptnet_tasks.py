@@ -40,18 +40,24 @@ from src.data.conceptnet import (
 RELATION_CLASSES: list[str] = sorted(
     {
         "IsA",
-        "HasA",
-        "PartOf",
+        "FormOf",
+        "DerivedFrom",
+        "HasContext",
+        "Synonym",
+        "Antonym",
+        "RelatedTo",
         "UsedFor",
-        "CapableOf",
         "AtLocation",
+        "PartOf",
+        "HasSubevent",
+        "CapableOf",
         "Causes",
         "HasProperty",
-        "RelatedTo",
-        "Other",
+        "Desire",
+        "Negation",
     }
 )
-assert len(RELATION_CLASSES) == 10
+assert len(RELATION_CLASSES) == 16
 
 CONCEPT_CATEGORIES: list[str] = [
     "animal",
@@ -478,7 +484,7 @@ def classify_domain(concept: str, G: nx.Graph | None = None) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_MAX_RETRIES = 10
+_MAX_RETRIES = 20
 
 
 def _safe_extract(
@@ -533,13 +539,49 @@ def _get_relation_index(G: nx.Graph) -> dict[str, list[tuple[str, str]]]:
 
     index: dict[str, list[tuple[str, str]]] = {cat: [] for cat in RELATION_CLASSES}
     for u, v, data in G.edges(data=True):
-        raw_rel = data.get("relation", data.get("raw_relation", "RelatedTo"))
+        raw_rel = data.get("raw_relation", data.get("relation", "RelatedTo"))
         cat = categorize_relation(raw_rel)
         if cat in index:
             index[cat].append((u, v))
 
     # Remove empty categories
     index = {k: v for k, v in index.items() if v}
+
+    # Augment Negation class with synthetic negative pairs.
+    # Real negation edges (NotCapableOf, NotHasProperty, NotDesires) are sparse
+    # (~3.5k).  We generate pairs where two nodes are 2-hop neighbors but share
+    # NO direct edge — the model must learn "no direct relation."
+    _NEGATION_TARGET = 12000
+    neg_key = "Negation"
+    real_neg = len(index.get(neg_key, []))
+    if real_neg < _NEGATION_TARGET:
+        needed = _NEGATION_TARGET - real_neg
+        nodes = list(G.nodes())
+        if len(nodes) > 1000:
+            synth_neg: list[tuple[str, str]] = []
+            adjacency = set()
+            for u, v in G.edges():
+                adjacency.add((u, v))
+                adjacency.add((v, u))
+            attempts = 0
+            max_attempts = needed * 10
+            while len(synth_neg) < needed and attempts < max_attempts:
+                attempts += 1
+                a = random.choice(nodes)
+                neighbors_a = set(G.neighbors(a))
+                if len(neighbors_a) < 2:
+                    continue
+                bridge = random.choice(list(neighbors_a))
+                hop2 = [n for n in G.neighbors(bridge)
+                        if n != a and n not in neighbors_a]
+                if not hop2:
+                    continue
+                c = random.choice(hop2)
+                if (a, c) not in adjacency:
+                    synth_neg.append((a, c))
+            if neg_key not in index:
+                index[neg_key] = []
+            index[neg_key].extend(synth_neg)
 
     G._relation_index = index  # type: ignore[attr-defined]
     return index
@@ -581,6 +623,8 @@ def generate_kg_relation_task(
     # Build subgraph seeded from one of the edge's endpoints
     seed_node = random.choice([u_seed, v_seed])
     u, v = None, None
+    is_negation = False
+    data: dict = {}
     for _ in range(_MAX_RETRIES):
         try:
             sub, node_list = extract_subgraph(
@@ -593,14 +637,42 @@ def generate_kg_relation_task(
             continue
 
         # Find an edge of the target category in this subgraph
-        matching = [
-            (eu, ev, d) for eu, ev, d in sub.edges(data=True)
-            if categorize_relation(d.get("relation", d.get("raw_relation", "RelatedTo"))) == target_category
-        ]
-        if matching:
-            u, v, data = random.choice(matching)
-            break
-        # Subgraph didn't contain target category — retry with new seed edge
+        if target_category == "Negation":
+            # For negation: target pair may not share a direct edge.
+            # Strategy: find two non-adjacent nodes within the subgraph.
+            if u_seed in node_list and v_seed in node_list:
+                u, v = u_seed, v_seed
+                is_negation = True
+                break
+            # Fallback: find any pair of non-adjacent nodes in subgraph
+            sub_nodes = list(sub.nodes())
+            sub_adj = set()
+            for eu, ev in sub.edges():
+                sub_adj.add((eu, ev))
+                sub_adj.add((ev, eu))
+            found_neg = False
+            random.shuffle(sub_nodes)
+            for ni in sub_nodes[:20]:
+                for nj in sub_nodes[:20]:
+                    if ni != nj and (ni, nj) not in sub_adj:
+                        u, v = ni, nj
+                        is_negation = True
+                        found_neg = True
+                        break
+                if found_neg:
+                    break
+            if found_neg:
+                break
+        else:
+            matching = [
+                (eu, ev, d) for eu, ev, d in sub.edges(data=True)
+                if categorize_relation(d.get("raw_relation", d.get("relation", "RelatedTo"))) == target_category
+            ]
+            if matching:
+                u, v, data = random.choice(matching)
+                is_negation = False
+                break
+        # Subgraph didn't contain target — retry with new seed edge
         u_seed, v_seed = random.choice(rel_index[target_category])
         seed_node = random.choice([u_seed, v_seed])
 
@@ -611,28 +683,33 @@ def generate_kg_relation_task(
         if not edges:
             raise ValueError("Subgraph has no edges")
         u, v, data = random.choice(edges)
+        is_negation = False
 
-    raw_rel = data.get("relation", data.get("raw_relation", "RelatedTo"))
-    category = categorize_relation(raw_rel)
-    answer = RELATION_CLASSES.index(category) if category in RELATION_CLASSES else RELATION_CLASSES.index("Other")
+    if is_negation:
+        category = "Negation"
+    else:
+        raw_rel = data.get("raw_relation", data.get("relation", "RelatedTo"))
+        category = categorize_relation(raw_rel)
+    answer = RELATION_CLASSES.index(category) if category in RELATION_CLASSES else RELATION_CLASSES.index("RelatedTo")
 
     cc, node_map, _ = conceptnet_subgraph_to_cc(sub, embedding_dim, node_list)
 
     # Mask the target edge's relation encoding to prevent data leakage
-    # (the model shouldn't be able to read the answer from the edge embedding)
-    from src.data.conceptnet import RELATION_CATEGORIES
-    n_rels = len(RELATION_CATEGORIES)
-    qi, ti = node_map[u], node_map[v]
-    B1 = cc.boundary_operator(1)
-    if B1 is not None and B1.numel() > 0:
-        edge_embs = cc.get_embeddings(1)
-        for edge_idx in range(B1.shape[1]):
-            col = B1[:, edge_idx]
-            nz = col.nonzero(as_tuple=False).squeeze(-1).tolist()
-            if set(nz) == {qi, ti}:
-                edge_embs[edge_idx, 1:min(1 + n_rels, edge_embs.shape[1])] = 0.0
-                break
-        cc.set_embeddings(1, edge_embs)
+    # (skip for Negation — there is no target edge to mask)
+    if not is_negation:
+        from src.data.conceptnet import RELATION_CATEGORIES
+        n_rels = len(RELATION_CATEGORIES)
+        qi, ti = node_map[u], node_map[v]
+        B1 = cc.boundary_operator(1)
+        if B1 is not None and B1.numel() > 0:
+            edge_embs = cc.get_embeddings(1)
+            for edge_idx in range(B1.shape[1]):
+                col = B1[:, edge_idx]
+                nz = col.nonzero(as_tuple=False).squeeze(-1).tolist()
+                if set(nz) == {qi, ti}:
+                    edge_embs[edge_idx, 1:min(1 + n_rels, edge_embs.shape[1])] = 0.0
+                    break
+            cc.set_embeddings(1, edge_embs)
 
     node_texts = _build_node_texts(sub, node_list)
 
@@ -899,10 +976,10 @@ def generate_kg_analogy_task(
 
     # Compute relation overlap (Jaccard on the multiset of relation types)
     rels_a = set(
-        data.get("relation", "Other") for _, _, data in sub_a.edges(data=True)
+        data.get("relation", "RelatedTo") for _, _, data in sub_a.edges(data=True)
     )
     rels_b = set(
-        data.get("relation", "Other") for _, _, data in sub_b.edges(data=True)
+        data.get("relation", "RelatedTo") for _, _, data in sub_b.edges(data=True)
     )
 
     if rels_a or rels_b:
@@ -975,10 +1052,10 @@ def generate_kg_analogy_task(
     for u, v, data in merged.edges(data=True):
         emb = torch.randn(embedding_dim) * 0.01
         weight = data.get("weight", 1.0)
-        relation = data.get("relation", "Other")
+        relation = data.get("relation", "RelatedTo")
         emb[0] = weight / 10.0
         # One-hot relation type in dims 1..n_rels
-        rel_idx = rel_to_idx.get(relation, rel_to_idx["Other"])
+        rel_idx = rel_to_idx.get(relation, rel_to_idx.get("RelatedTo", 0))
         if 1 + rel_idx < embedding_dim:
             emb[1:min(1 + n_rels, embedding_dim)] = 0.0
             emb[1 + rel_idx] = 1.0
@@ -1112,12 +1189,12 @@ def generate_kg_transitive_task(
         random.shuffle(nodes)
         for a in nodes:
             for b in (sub.successors(a) if sub.is_directed() else sub.neighbors(a)):
-                rel_ab = sub[a][b].get('relation', '')
+                rel_ab = sub[a][b].get('raw_relation', sub[a][b].get('relation', ''))
                 successors_b = sub.successors(b) if sub.is_directed() else sub.neighbors(b)
                 for c in successors_b:
                     if c == a:
                         continue
-                    rel_bc = sub[b][c].get('relation', '')
+                    rel_bc = sub[b][c].get('raw_relation', sub[b][c].get('relation', ''))
                     if rel_ab == rel_bc and rel_ab in _TRANSITIVE_RELATIONS:
                         cls = rel_ab if rel_ab in TRANSITIVE_CLASSES else "none"
                     else:
@@ -1127,11 +1204,10 @@ def generate_kg_transitive_task(
         if not chains:
             continue
 
-        # Filter for target class
+        # Filter for target class -- strict, no fallback to unbalanced
         matching = [ch for ch in chains if ch[5] == target_class]
         if not matching:
-            # Accept any chain from this subgraph
-            matching = chains
+            continue  # retry with new subgraph
 
         a, b, c, rel_ab, rel_bc, answer_str = random.choice(matching)
         answer = TRANSITIVE_CLASSES.index(answer_str)
@@ -1166,61 +1242,68 @@ def generate_kg_consistency_task(
     min_nodes: int = 20,
     max_nodes: int = 50,
 ) -> tuple | None:
-    """Generate logical consistency checking task.
+    """Generate logical consistency checking task with balanced sampling.
 
-    50% of samples are consistent (answer=1), 50% have a semantic
-    contradiction (answer=0). Corruption: replace one edge's target with
-    a concept from a different branch.
+    Picks target class first (corrupted=0, valid=1) uniformly, then
+    searches for a subgraph that can satisfy the target. This prevents
+    silent fallback to valid when no IsA edges exist for corruption.
     """
-    sub, node_list = _safe_extract(G, min_nodes, max_nodes)
+    target_corrupted = random.random() < 0.5
 
-    corrupted = random.random() < 0.5
-    u_node = None
-    replacement = None
+    for _ in range(_MAX_RETRIES):
+        sub, node_list = _safe_extract(G, min_nodes, max_nodes)
 
-    if corrupted:
-        isa_edges = [(u, v) for u, v, d in sub.edges(data=True)
-                     if d.get('relation') == 'IsA']
-        if not isa_edges:
-            corrupted = False
-        else:
+        if target_corrupted:
+            isa_edges = [(u, v) for u, v, d in sub.edges(data=True)
+                         if d.get('raw_relation', d.get('relation', '')) == 'IsA']
+            if not isa_edges:
+                continue  # retry -- need IsA edges for corruption
+
             u_node, v_node = random.choice(isa_edges)
-            # Find candidates: nodes that are NOT in the IsA ancestry of u
             all_nodes = list(sub.nodes())
             candidates = [n for n in all_nodes if n != u_node and n != v_node]
 
-            if candidates:
-                replacement = random.choice(candidates)
-                sub = sub.copy()
-                sub.remove_edge(u_node, v_node)
-                sub.add_edge(u_node, replacement, relation='IsA', weight=1.0)
-                # Update node_list if replacement wasn't in it
-                if replacement not in node_list:
-                    node_list = list(node_list) + [replacement]
+            if not candidates:
+                continue  # retry -- need replacement candidates
+
+            replacement = random.choice(candidates)
+            sub = sub.copy()
+            sub.remove_edge(u_node, v_node)
+            sub.add_edge(u_node, replacement, relation='IsA', weight=1.0)
+            if replacement not in node_list:
+                node_list = list(node_list) + [replacement]
+
+            answer = 0
+            cc, node_map, _ = conceptnet_subgraph_to_cc(sub, embedding_dim, node_list)
+            node_texts = _build_node_texts(sub, node_list)
+
+            if u_node in node_map and replacement in node_map:
+                query_idx = node_map[u_node]
+                target_idx = node_map[replacement]
             else:
-                corrupted = False
+                continue  # retry -- nodes not in map
+        else:
+            # Valid (uncorrupted) -- any subgraph works
+            answer = 1
+            cc, node_map, _ = conceptnet_subgraph_to_cc(sub, embedding_dim, node_list)
+            node_texts = _build_node_texts(sub, node_list)
 
-    answer = 0 if corrupted else 1
-    cc, node_map, _ = conceptnet_subgraph_to_cc(sub, embedding_dim, node_list)
-    node_list_final = list(node_map.keys())
-    node_texts = _build_node_texts(sub, node_list)
+            valid_indices = list(node_map.values())
+            query_idx = valid_indices[0]
+            target_idx = valid_indices[min(1, len(valid_indices) - 1)]
 
-    if corrupted and u_node in node_map and replacement in node_map:
-        query_idx = node_map[u_node]
-        target_idx = node_map[replacement]
-    else:
-        valid_indices = list(node_map.values())
-        query_idx = valid_indices[0]
-        target_idx = valid_indices[min(1, len(valid_indices) - 1)]
+        node_list_final = list(node_map.keys())
 
-    meta = {
-        'task_type': 'kg_consistency',
-        'node_texts': node_texts,
-        'corrupted': corrupted,
-        'num_nodes': len(node_list_final),
-        'num_classes': 2,
-    }
-    return cc, query_idx, target_idx, answer, meta
+        meta = {
+            'task_type': 'kg_consistency',
+            'node_texts': node_texts,
+            'corrupted': target_corrupted,
+            'num_nodes': len(node_list_final),
+            'num_classes': 2,
+        }
+        return cc, query_idx, target_idx, answer, meta
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1236,120 +1319,133 @@ def generate_kg_analogy_task_v10(
 ) -> tuple | None:
     """Redesigned analogy task using relation-type structural matching.
 
-    Extracts two subgraphs. Computes structural similarity based on
-    relation-type distribution overlap AND degree distribution similarity.
+    Picks target class first (uniform over 3 classes), then generates
+    subgraph pairs until the combined score falls in the target range.
+    This prevents any single class from dominating the distribution.
+
     Classes: 0=not_analogous, 1=partial, 2=analogous.
     """
     from src.cell_complex.cell_complex import CellComplex as CC
     from src.benchmarks.topological_tasks import auto_fill_triangles
     from collections import Counter
 
-    sub_a, nlist_a = _safe_extract(G, min_nodes, max_nodes)
-    sub_b, nlist_b = _safe_extract(G, min_nodes, max_nodes)
+    ANALOGY_CLASSES = ["not_analogous", "partial", "analogous"]
+    target_class = random.choice(ANALOGY_CLASSES)
+    target_answer = ANALOGY_CLASSES.index(target_class)
 
-    # Compute relation-type distribution overlap (Jaccard)
-    rels_a = Counter(
-        data.get("relation", "Other") for _, _, data in sub_a.edges(data=True)
-    )
-    rels_b = Counter(
-        data.get("relation", "Other") for _, _, data in sub_b.edges(data=True)
-    )
-    all_rel_keys = set(rels_a.keys()) | set(rels_b.keys())
-    if all_rel_keys:
-        intersection = sum(min(rels_a.get(k, 0), rels_b.get(k, 0)) for k in all_rel_keys)
-        union = sum(max(rels_a.get(k, 0), rels_b.get(k, 0)) for k in all_rel_keys)
-        rel_overlap = intersection / max(union, 1)
-    else:
-        rel_overlap = 0.0
+    for _ in range(_MAX_RETRIES):
+        sub_a, nlist_a = _safe_extract(G, min_nodes, max_nodes)
+        sub_b, nlist_b = _safe_extract(G, min_nodes, max_nodes)
 
-    # Compute degree distribution similarity
-    degs_a = sorted(dict(sub_a.degree()).values())
-    degs_b = sorted(dict(sub_b.degree()).values())
-    if degs_a and degs_b:
-        max_deg = max(max(degs_a), max(degs_b), 1)
-        norm_a = [d / max_deg for d in degs_a]
-        norm_b = [d / max_deg for d in degs_b]
-        mean_a = sum(norm_a) / len(norm_a)
-        mean_b = sum(norm_b) / len(norm_b)
-        deg_sim = 1.0 - abs(mean_a - mean_b)
-    else:
-        deg_sim = 0.0
+        # Compute relation-type distribution overlap (Jaccard)
+        rels_a = Counter(
+            data.get("raw_relation", data.get("relation", "RelatedTo")) for _, _, data in sub_a.edges(data=True)
+        )
+        rels_b = Counter(
+            data.get("raw_relation", data.get("relation", "RelatedTo")) for _, _, data in sub_b.edges(data=True)
+        )
+        all_rel_keys = set(rels_a.keys()) | set(rels_b.keys())
+        if all_rel_keys:
+            intersection = sum(min(rels_a.get(k, 0), rels_b.get(k, 0)) for k in all_rel_keys)
+            union = sum(max(rels_a.get(k, 0), rels_b.get(k, 0)) for k in all_rel_keys)
+            rel_overlap = intersection / max(union, 1)
+        else:
+            rel_overlap = 0.0
 
-    # Combined score
-    score = 0.6 * rel_overlap + 0.4 * deg_sim
+        # Compute degree distribution similarity
+        degs_a = sorted(dict(sub_a.degree()).values())
+        degs_b = sorted(dict(sub_b.degree()).values())
+        if degs_a and degs_b:
+            max_deg = max(max(degs_a), max(degs_b), 1)
+            norm_a = [d / max_deg for d in degs_a]
+            norm_b = [d / max_deg for d in degs_b]
+            mean_a = sum(norm_a) / len(norm_a)
+            mean_b = sum(norm_b) / len(norm_b)
+            deg_sim = 1.0 - abs(mean_a - mean_b)
+        else:
+            deg_sim = 0.0
 
-    if score > 0.6:
-        answer = 2  # analogous
-    elif score > 0.35:
-        answer = 1  # partial
-    else:
-        answer = 0  # not analogous
+        # Combined score
+        score = 0.6 * rel_overlap + 0.4 * deg_sim
 
-    # Build merged graph
-    merged = nx.Graph()
-    for node in sub_a.nodes():
-        merged.add_node(f"a_{node}", prefix="a", original=node)
-    for u, v, data in sub_a.edges(data=True):
-        merged.add_edge(f"a_{u}", f"a_{v}", **data)
-    for node in sub_b.nodes():
-        merged.add_node(f"b_{node}", prefix="b", original=node)
-    for u, v, data in sub_b.edges(data=True):
-        merged.add_edge(f"b_{u}", f"b_{v}", **data)
+        if score > 0.6:
+            answer = 2  # analogous
+        elif score > 0.35:
+            answer = 1  # partial
+        else:
+            answer = 0  # not analogous
 
-    # Build CellComplex
-    cc = CC(embedding_dim=embedding_dim)
-    node_map = {}
-    merged_nodes = list(merged.nodes())
-    merged_degrees = dict(merged.degree())
-    merged_max_deg = max(merged_degrees.values()) if merged_degrees else 1
-    merged_max_deg = max(merged_max_deg, 1)
-    merged_clust = nx.clustering(merged)
+        # Only accept if score falls in target class range
+        if answer != target_answer:
+            continue
 
-    for mnode in merged_nodes:
-        emb = torch.randn(embedding_dim) * 0.01
-        emb[0] = merged_degrees[mnode] / merged_max_deg
-        emb[1] = merged_clust[mnode]
-        cc_idx = cc.add_0_cell(emb, "node")
-        node_map[mnode] = cc_idx
+        # Build merged graph
+        merged = nx.Graph()
+        for node in sub_a.nodes():
+            merged.add_node(f"a_{node}", prefix="a", original=node)
+        for u, v, data in sub_a.edges(data=True):
+            merged.add_edge(f"a_{u}", f"a_{v}", **data)
+        for node in sub_b.nodes():
+            merged.add_node(f"b_{node}", prefix="b", original=node)
+        for u, v, data in sub_b.edges(data=True):
+            merged.add_edge(f"b_{u}", f"b_{v}", **data)
 
-    cc.node_texts = []
-    for mnode in merged_nodes:
-        original = merged.nodes[mnode].get("original", mnode)
-        prefix = merged.nodes[mnode].get("prefix", "")
-        cc.node_texts.append(f"{prefix}: {concept_to_text(original)}")
+        # Build CellComplex
+        cc = CC(embedding_dim=embedding_dim)
+        node_map = {}
+        merged_nodes = list(merged.nodes())
+        merged_degrees = dict(merged.degree())
+        merged_max_deg = max(merged_degrees.values()) if merged_degrees else 1
+        merged_max_deg = max(merged_max_deg, 1)
+        merged_clust = nx.clustering(merged)
 
-    from src.data.conceptnet import RELATION_CATEGORIES
-    rel_to_idx = {r: i for i, r in enumerate(RELATION_CATEGORIES)}
-    n_rels = len(RELATION_CATEGORIES)
+        for mnode in merged_nodes:
+            emb = torch.randn(embedding_dim) * 0.01
+            emb[0] = merged_degrees[mnode] / merged_max_deg
+            emb[1] = merged_clust[mnode]
+            cc_idx = cc.add_0_cell(emb, "node")
+            node_map[mnode] = cc_idx
 
-    for u, v, data in merged.edges(data=True):
-        emb = torch.randn(embedding_dim) * 0.01
-        weight = data.get("weight", 1.0)
-        relation = data.get("relation", "Other")
-        emb[0] = weight / 10.0
-        rel_idx = rel_to_idx.get(relation, rel_to_idx["Other"])
-        if 1 + rel_idx < embedding_dim:
-            emb[1:min(1 + n_rels, embedding_dim)] = 0.0
-            emb[1 + rel_idx] = 1.0
-        cc.add_1_cell(node_map[u], node_map[v], emb, relation)
+        cc.node_texts = []
+        for mnode in merged_nodes:
+            original = merged.nodes[mnode].get("original", mnode)
+            prefix = merged.nodes[mnode].get("prefix", "")
+            cc.node_texts.append(f"{prefix}: {concept_to_text(original)}")
 
-    auto_fill_triangles(cc)
+        from src.data.conceptnet import RELATION_CATEGORIES
+        rel_to_idx = {r: i for i, r in enumerate(RELATION_CATEGORIES)}
+        n_rels = len(RELATION_CATEGORIES)
 
-    query_node = f"a_{nlist_a[0]}"
-    target_node = f"b_{nlist_b[0]}"
-    query_idx = node_map[query_node]
-    target_idx = node_map[target_node]
+        for u, v, data in merged.edges(data=True):
+            emb = torch.randn(embedding_dim) * 0.01
+            weight = data.get("weight", 1.0)
+            relation = data.get("raw_relation", data.get("relation", "RelatedTo"))
+            emb[0] = weight / 10.0
+            rel_idx = rel_to_idx.get(relation, rel_to_idx.get("RelatedTo", 0))
+            if 1 + rel_idx < embedding_dim:
+                emb[1:min(1 + n_rels, embedding_dim)] = 0.0
+                emb[1 + rel_idx] = 1.0
+            cc.add_1_cell(node_map[u], node_map[v], emb, relation)
 
-    meta = {
-        'task_type': 'kg_analogy',
-        'subgraph_a_size': sub_a.number_of_nodes(),
-        'subgraph_b_size': sub_b.number_of_nodes(),
-        'rel_overlap': rel_overlap,
-        'deg_similarity': deg_sim,
-        'combined_score': score,
-        'num_classes': 3,
-    }
-    return cc, query_idx, target_idx, answer, meta
+        auto_fill_triangles(cc)
+
+        query_node = f"a_{nlist_a[0]}"
+        target_node = f"b_{nlist_b[0]}"
+        query_idx = node_map[query_node]
+        target_idx = node_map[target_node]
+
+        meta = {
+            'task_type': 'kg_analogy',
+            'subgraph_a_size': sub_a.number_of_nodes(),
+            'subgraph_b_size': sub_b.number_of_nodes(),
+            'rel_overlap': rel_overlap,
+            'deg_similarity': deg_sim,
+            'combined_score': score,
+            'num_classes': 3,
+        }
+        return cc, query_idx, target_idx, answer, meta
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1387,12 +1483,12 @@ def generate_kg_causal_chain_task(
         for a in nodes:
             neighbors_a = list(sub.successors(a) if sub.is_directed() else sub.neighbors(a))
             for b in neighbors_a:
-                rel_ab = sub[a][b].get('relation', '')
+                rel_ab = sub[a][b].get('raw_relation', sub[a][b].get('relation', ''))
                 successors_b = list(sub.successors(b) if sub.is_directed() else sub.neighbors(b))
                 for c in successors_b:
                     if c == a:
                         continue
-                    rel_bc = sub[b][c].get('relation', '')
+                    rel_bc = sub[b][c].get('raw_relation', sub[b][c].get('relation', ''))
 
                     ab_causal = rel_ab in _CAUSAL_RELATIONS
                     bc_causal = rel_bc in _CAUSAL_RELATIONS
@@ -1411,9 +1507,10 @@ def generate_kg_causal_chain_task(
         if not chains:
             continue
 
+        # Filter for target class -- strict, no fallback to unbalanced
         matching = [ch for ch in chains if ch[5] == target_class]
         if not matching:
-            matching = chains
+            continue  # retry with new subgraph
 
         a, b, c, rel_ab, rel_bc, class_name = random.choice(matching)
         answer = CAUSAL_CHAIN_CLASSES.index(class_name)

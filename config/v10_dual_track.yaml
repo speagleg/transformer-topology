@@ -2,15 +2,15 @@
 # v10: Dual-Track Fusion — asymmetric executive loop + redesigned KG tasks
 
 model:
-  embedding_dim: 32
-  gnn_hidden: 64
+  embedding_dim: 64
+  gnn_hidden: 128
   gnn_spatial_layers: 2
   gnn_spectral_layers: 2
   max_freqs: 16
   tat_layers: 2
   tat_spatial_heads: 4
   tat_spectral_heads: 4
-  tat_ff_dim: 128
+  tat_ff_dim: 256
   max_iterations: 2
   convergence_threshold: 0.05
   use_higher_order: true
@@ -33,10 +33,10 @@ llm:
   backend: qwen_contextual
   qwen_model: Qwen/Qwen2.5-3B-Instruct
   llm_dim: 2048
-  output_dim: 32
+  output_dim: 64
   num_qwen_layers: 4
   max_tokens_per_concept: 16
-  num_tasks: 23  # 19 original + 4 v10 KG tasks
+  num_tasks: 29  # 19 original + 4 v10 KG tasks + 6 v11
   use_mock: false
 
 training:
@@ -51,6 +51,8 @@ training:
   use_class_weights: false  # disabled: balanced sampling makes class_weights unnecessary
   curl_penalty_weight: 0.01
   curl_penalty_threshold: 0.5
+  spectral_gap_weight: 0.01
+  fusion_weight_init: -1.0
   scheduler: cosine_warm_restarts
   scheduler_eta_min: 0.00001
   batch_size: 8

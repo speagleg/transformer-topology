@@ -166,8 +166,8 @@ class TestParseConceptNetLine:
 
 
 class TestCategorizeRelation:
-    def test_all_ten_categories_exist(self):
-        assert len(RELATION_CATEGORIES) == 10
+    def test_all_sixteen_categories_exist(self):
+        assert len(RELATION_CATEGORIES) == 16
 
     def test_isa_variants(self):
         for rel in ["IsA", "DefinedAs", "MannerOf", "InstanceOf"]:

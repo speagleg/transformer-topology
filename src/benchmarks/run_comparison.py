@@ -86,7 +86,8 @@ class HierarchicalMultiHopModel(nn.Module):
                  use_embedding_topo_feedback=False,
                  use_multi_head_classifier=False,
                  use_metacog=False,
-                 use_dual_track=False):
+                 use_dual_track=False,
+                 fusion_weight_init: float = -1.0):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.use_llm = use_llm
@@ -133,6 +134,7 @@ class HierarchicalMultiHopModel(nn.Module):
             use_metacog=use_metacog,
             num_tasks=lc.get('num_tasks', 19) if use_metacog else 0,
             use_dual_track=use_dual_track,
+            fusion_weight_init=fusion_weight_init,
         )
 
         # v10 dual-track: QwenContextualEncoder + AttentionReadout
@@ -152,6 +154,7 @@ class HierarchicalMultiHopModel(nn.Module):
             self.attention_readout = AttentionReadout(
                 embed_dim=embedding_dim,
                 num_tasks=lc.get('num_tasks', 23),
+                text_dim=embedding_dim,
             )
 
         # Legacy TopoBridge for mock/llama/qwen backends (Phase 4c compat)
@@ -503,11 +506,13 @@ class HierarchicalMultiHopModel(nn.Module):
             topo_features = topo_features[:4]
         elif topo_features.shape[0] < 4:
             topo_features = torch.cat([topo_features, torch.zeros(4 - topo_features.shape[0], device=dev)])
+        text_for_classifier = diagnostics.get('text_embeddings', None)
         combined = self.attention_readout.build_classifier_input(
             output, query_node, target_node,
             task_id=task_id,
             topo_features=topo_features,
             fusion_weight=fw_val,
+            text_embeddings=text_for_classifier,
         )
         self._last_combined = combined.detach()
 

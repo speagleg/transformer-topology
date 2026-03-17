@@ -108,3 +108,26 @@ class TestBatchedDualTrack:
         assert len(results) == 2
         assert results[0][0].shape == (4, DIM)
         assert results[1][0].shape == (5, DIM)
+
+
+def test_v10_text_flows_to_classifier():
+    """Verify enriched text embeddings reach the classifier input."""
+    from src.reasoning_loop.attention_readout import AttentionReadout
+
+    readout = AttentionReadout(embed_dim=32, num_tasks=19, text_dim=32)
+    assert readout.output_dim == 165
+
+    h_out = torch.randn(10, 32)
+    text_embs = torch.randn(10, 32, requires_grad=True)
+    topo = torch.randn(4)
+    fw = torch.tensor(0.5)
+
+    combined = readout.build_classifier_input(
+        h_out, query_idx=0, target_idx=1, task_id=0,
+        topo_features=topo, fusion_weight=fw,
+        text_embeddings=text_embs,
+    )
+    assert combined.shape == (165,)
+    combined.sum().backward()
+    assert text_embs.grad is not None
+    assert text_embs.grad.abs().sum() > 0

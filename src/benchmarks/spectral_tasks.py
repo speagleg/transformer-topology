@@ -188,48 +188,69 @@ def generate_hodge_class_task(
     # Choose target class (balanced 1/3 each)
     target_class = random.randint(0, 2)
 
-    B1 = cc.boundary_operator(1)  # (n_nodes, n_edges)
-    has_2cells = cc.num_cells(2) > 0
-    B2 = cc.boundary_operator(2) if has_2cells else None
+    # For curl and harmonic: if the graph lacks the required structure
+    # (no triangles for curl, no harmonic space), regenerate a new graph
+    # instead of falling back to gradient. This ensures balanced classes.
+    _MAX_GRAPH_RETRIES = 20
+    for _retry in range(_MAX_GRAPH_RETRIES):
+        B1 = cc.boundary_operator(1)  # (n_nodes, n_edges)
+        has_2cells = cc.num_cells(2) > 0
+        B2 = cc.boundary_operator(2) if has_2cells else None
 
-    signal = None
+        signal = None
 
-    if target_class == 0:  # gradient: signal = B1^T @ v
+        if target_class == 0:  # gradient: signal = B1^T @ v
+            v = torch.randn(cc.num_cells(0))
+            signal = B1.T @ v
+            break
+
+        elif target_class == 1:  # curl: signal = B2 @ w
+            if B2 is not None and cc.num_cells(2) > 0:
+                w = torch.randn(cc.num_cells(2))
+                signal = B2 @ w
+                if signal.norm() > 1e-8:
+                    break
+            # No valid curl — regenerate graph with fresh topology
+            topo = random.choice(topologies) if topologies else None
+            G = random_graph(n_nodes, topology=topo)
+            nodes = list(G.nodes())
+            source_nx, target_nx = random.sample(nodes, 2)
+            cc, node_map = nx_to_cell_complex(
+                G, embedding_dim,
+                source_node=source_nx, target_node=target_nx,
+            )
+            continue
+
+        elif target_class == 2:  # harmonic: signal in ker(L1)
+            L1 = B1.T @ B1
+            if B2 is not None:
+                L1 = L1 + B2 @ B2.T
+            eigenvalues, eigenvectors = torch.linalg.eigh(L1.float())
+            harmonic_mask = eigenvalues.abs() < 1e-5
+            if harmonic_mask.sum() > 0:
+                harmonic_basis = eigenvectors[:, harmonic_mask]
+                coeffs = torch.randn(harmonic_basis.shape[1])
+                signal = harmonic_basis @ coeffs
+                break
+            # No harmonic space — regenerate graph
+            topo = random.choice(topologies) if topologies else None
+            G = random_graph(n_nodes, topology=topo)
+            nodes = list(G.nodes())
+            source_nx, target_nx = random.sample(nodes, 2)
+            cc, node_map = nx_to_cell_complex(
+                G, embedding_dim,
+                source_node=source_nx, target_node=target_nx,
+            )
+            continue
+    else:
+        # Exhausted retries — fall back to gradient as last resort
+        B1 = cc.boundary_operator(1)
+        target_class = 0
         v = torch.randn(cc.num_cells(0))
         signal = B1.T @ v
 
-    elif target_class == 1:  # curl: signal = B2 @ w
-        if B2 is not None and cc.num_cells(2) > 0:
-            w = torch.randn(cc.num_cells(2))
-            signal = B2 @ w
-            if signal.norm() < 1e-8:
-                # Degenerate B2, fall back to gradient
-                target_class = 0
-                v = torch.randn(cc.num_cells(0))
-                signal = B1.T @ v
-        else:
-            # No 2-cells available, fall back to gradient
-            target_class = 0
-            v = torch.randn(cc.num_cells(0))
-            signal = B1.T @ v
-
-    elif target_class == 2:  # harmonic: signal in ker(L1)
-        L1 = B1.T @ B1
-        if B2 is not None:
-            L1 = L1 + B2 @ B2.T
-        eigenvalues, eigenvectors = torch.linalg.eigh(L1.float())
-        harmonic_mask = eigenvalues.abs() < 1e-5
-        if harmonic_mask.sum() > 0:
-            harmonic_basis = eigenvectors[:, harmonic_mask]
-            coeffs = torch.randn(harmonic_basis.shape[1])
-            signal = harmonic_basis @ coeffs
-        else:
-            # No harmonic space, fall back to gradient
-            target_class = 0
-            v = torch.randn(cc.num_cells(0))
-            signal = B1.T @ v
-
     # Normalize signal, add noise (small enough to preserve class)
+    n_edges = cc.num_cells(1)  # refresh after possible graph regeneration
     if signal.norm() > 1e-8:
         signal = signal / signal.norm()
     noise = torch.randn(n_edges) * 0.1

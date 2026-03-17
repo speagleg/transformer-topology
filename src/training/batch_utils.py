@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 from src.benchmarks.run_comparison import _unpack_sample
 from src.training.focal_loss import focal_loss
+from src.training.spectral_reg import spectral_gap_loss, compute_batch_spectral_gap
 
 
 def graph_collate_fn(samples):
@@ -103,11 +104,13 @@ def _forward_batch_v10(model, batch, device, task=None, topo_features=None):
         elif tf.shape[0] < 4:
             tf = torch.cat([tf, torch.zeros(4 - tf.shape[0], device=device)])
 
+        text_for_classifier = diagnostics.get('text_embeddings', None)
         combined = model.attention_readout.build_classifier_input(
             output, queries[g], targets[g],
             task_id=task_id,
             topo_features=tf,
             fusion_weight=fw_val,
+            text_embeddings=text_for_classifier,
         )
         model._last_combined = combined.detach()
 
@@ -361,6 +364,7 @@ def train_epoch_batched(
     bridge_accumulation_steps=8,
     calibration_loss_weight=0.0,
     efficiency_loss_weight=0.0,
+    spectral_gap_weight: float = 0.0,
 ):
     """Training epoch with graph-level mini-batching.
 
@@ -416,7 +420,10 @@ def train_epoch_batched(
     if bridge_optimizer is not None:
         bridge_optimizer.zero_grad()
 
-    for batch_indices in batches:
+    num_batches = len(batches)
+    log_interval = max(1, num_batches // 10)  # Log ~10 times per epoch
+
+    for batch_idx, batch_indices in enumerate(batches):
         optimizer.zero_grad()
         samples = [_unpack_sample(dataset[i]) for i in batch_indices]
 
@@ -453,6 +460,14 @@ def train_epoch_batched(
                 adj = model._last_adjacency.to(sf.device)
                 c_loss = contrastive_fn(sf, adj) * contrastive_weight
                 batch_loss = batch_loss + c_loss
+
+            # Spectral gap regularization
+            if spectral_gap_weight > 0 and valid_count > 0:
+                batch_ccs = [s[0] for s in samples]
+                gap = compute_batch_spectral_gap(batch_ccs)
+                if gap.item() > 0:
+                    sg_loss = spectral_gap_loss(gap) * spectral_gap_weight
+                    batch_loss = batch_loss + sg_loss
 
             # Metacognition auxiliary losses
             if valid_count > 0 and getattr(model, 'use_metacog', False):
@@ -501,6 +516,11 @@ def train_epoch_batched(
 
             total_loss += batch_loss.item() * valid_count
             n_samples += valid_count
+
+        if batch_idx % log_interval == 0 or batch_idx == num_batches - 1:
+            avg = total_loss / max(n_samples, 1)
+            print(f"    batch {batch_idx+1}/{num_batches}  loss={avg:.4f}  "
+                  f"samples={n_samples}", flush=True)
 
     # Final bridge step for remaining accumulated gradients
     if bridge_optimizer is not None and bridge_batch_count % bridge_accumulation_steps != 0:

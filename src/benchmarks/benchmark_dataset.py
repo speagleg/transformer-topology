@@ -291,7 +291,7 @@ TASK_REGISTRY: dict[str, tuple[callable, int, dict]] = {
     "labeled_reasoning":    (_wrap_labeled_reasoning, 3, {}),
     "analogical_transfer":  (_wrap_analogical_transfer, 3, {}),
     # Phase D: Knowledge graph tasks (require conceptnet_graph kwarg)
-    "kg_relation":          (_wrap_kg_relation, 10, {}),
+    "kg_relation":          (_wrap_kg_relation, 16, {}),
     "kg_concept":           (_wrap_kg_concept, 9, {}),
     "kg_pathvalid":         (_wrap_kg_pathvalid, 2, {}),
     "kg_analogy":           (_wrap_kg_analogy, 3, {}),
@@ -379,8 +379,17 @@ class BenchmarkDataset:
 
     @classmethod
     def load(cls, path: str) -> "BenchmarkDataset":
-        """Load dataset from disk."""
+        """Load dataset from disk.
+
+        Handles both dict format (from .save()) and pickled object format
+        (from torch.save(ds, path)).
+        """
         data = torch.load(path, weights_only=False)
+        if isinstance(data, cls):
+            # Pickled BenchmarkDataset object — always reset _indices
+            # to avoid stale shuffle state from the serialized object
+            data._indices = None
+            return data
         obj = cls.__new__(cls)
         obj.samples = data["samples"]
         obj.task_type = data["task_type"]

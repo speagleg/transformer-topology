@@ -49,7 +49,13 @@ class TestKgTransitive:
 
     def test_generate_returns_5_tuple(self):
         G = _make_conceptnet_graph()
-        result = generate_kg_transitive_task(G, embedding_dim=32, min_nodes=5, max_nodes=15)
+        # With balanced sampling, some target classes may not exist in the
+        # small test graph (e.g. HasA), so retry until we get a result.
+        result = None
+        for _ in range(20):
+            result = generate_kg_transitive_task(G, embedding_dim=32, min_nodes=5, max_nodes=15)
+            if result is not None:
+                break
         assert result is not None
         cc, query, target, answer, meta = result
         assert 0 <= answer < 5
@@ -65,17 +71,24 @@ class TestKgTransitive:
 
     def test_metadata_has_chain(self):
         G = _make_conceptnet_graph()
-        result = generate_kg_transitive_task(G, embedding_dim=32, min_nodes=5, max_nodes=15)
-        if result is not None:
-            _, _, _, _, meta = result
-            assert 'chain' in meta
+        for _ in range(20):
+            result = generate_kg_transitive_task(G, embedding_dim=32, min_nodes=5, max_nodes=15)
+            if result is not None:
+                _, _, _, _, meta = result
+                assert 'chain' in meta
+                return
 
 
 class TestKgConsistency:
 
     def test_generate_returns_5_tuple(self):
         G = _make_conceptnet_graph()
-        result = generate_kg_consistency_task(G, embedding_dim=32, min_nodes=5, max_nodes=15)
+        # With balanced sampling, retry until we get a result.
+        result = None
+        for _ in range(20):
+            result = generate_kg_consistency_task(G, embedding_dim=32, min_nodes=5, max_nodes=15)
+            if result is not None:
+                break
         assert result is not None
         cc, query, target, answer, meta = result
         assert answer in (0, 1)
@@ -103,7 +116,13 @@ class TestKgAnalogyV10:
 
     def test_generate_returns_5_tuple(self):
         G = _make_conceptnet_graph()
-        result = generate_kg_analogy_task_v10(G, embedding_dim=32, min_nodes=3, max_nodes=8)
+        # With balanced sampling, some target classes may not be achievable
+        # with small test graphs, so retry.
+        result = None
+        for _ in range(20):
+            result = generate_kg_analogy_task_v10(G, embedding_dim=32, min_nodes=3, max_nodes=8)
+            if result is not None:
+                break
         assert result is not None
         cc, query, target, answer, meta = result
         assert 0 <= answer <= 2
@@ -111,11 +130,13 @@ class TestKgAnalogyV10:
 
     def test_metadata_has_subgraph_info(self):
         G = _make_conceptnet_graph()
-        result = generate_kg_analogy_task_v10(G, embedding_dim=32, min_nodes=3, max_nodes=8)
-        if result is not None:
-            _, _, _, _, meta = result
-            assert 'subgraph_a_size' in meta
-            assert 'subgraph_b_size' in meta
+        for _ in range(20):
+            result = generate_kg_analogy_task_v10(G, embedding_dim=32, min_nodes=3, max_nodes=8)
+            if result is not None:
+                _, _, _, _, meta = result
+                assert 'subgraph_a_size' in meta
+                assert 'subgraph_b_size' in meta
+                return
 
 
 class TestKgCausalChain:
@@ -128,7 +149,13 @@ class TestKgCausalChain:
 
     def test_generate_returns_5_tuple(self):
         G = _make_conceptnet_graph()
-        result = generate_kg_causal_chain_task(G, embedding_dim=32, min_nodes=5, max_nodes=15)
+        # With balanced sampling, some target classes may not exist in the
+        # small test graph, so retry until we get a result.
+        result = None
+        for _ in range(20):
+            result = generate_kg_causal_chain_task(G, embedding_dim=32, min_nodes=5, max_nodes=15)
+            if result is not None:
+                break
         assert result is not None
         cc, query, target, answer, meta = result
         assert 0 <= answer < 3
@@ -136,8 +163,10 @@ class TestKgCausalChain:
 
     def test_metadata_has_chain(self):
         G = _make_conceptnet_graph()
-        result = generate_kg_causal_chain_task(G, embedding_dim=32, min_nodes=5, max_nodes=15)
-        if result is not None:
-            _, _, _, _, meta = result
-            assert 'chain' in meta
-            assert 'class_name' in meta
+        for _ in range(20):
+            result = generate_kg_causal_chain_task(G, embedding_dim=32, min_nodes=5, max_nodes=15)
+            if result is not None:
+                _, _, _, _, meta = result
+                assert 'chain' in meta
+                assert 'class_name' in meta
+                return
