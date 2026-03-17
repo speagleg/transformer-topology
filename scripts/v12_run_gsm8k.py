@@ -212,7 +212,7 @@ def eval_metacog(model, tokenizer, problem: str, embedding_dim: int = 128) -> di
     )
 
     t0 = time.time()
-    result = reasoner.solve(problem)
+    result = reasoner.solve_hybrid(problem)
     elapsed = time.time() - t0
 
     # Extract numeric answer from the answer string

@@ -243,6 +243,125 @@ class MetacognitiveReasoner:
             "problem_type": problem_type,
         }
 
+    def solve_hybrid(self, problem: str, max_retries: int = 2) -> dict:
+        """Hybrid mode: free-form CoT first, topology monitoring post-hoc.
+
+        1. Generate full CoT reasoning in one pass (free-form, no JSON)
+        2. Parse CoT into reasoning steps
+        3. Build reasoning graph, analyze topology
+        4. If unhealthy: re-prompt with intervention, up to max_retries
+        5. Force final answer extraction
+
+        This preserves CoT's natural reasoning quality while adding
+        topology-based error detection and correction.
+        """
+        health_reports = []
+        interventions = []
+        intervention = None
+
+        for attempt in range(max_retries + 1):
+            # 1. Generate free-form CoT
+            cot_text = self._generate_cot(problem, intervention)
+
+            # 2. Parse into steps
+            steps = self._parse_cot_to_steps(cot_text)
+
+            # 3. Build reasoning graph
+            gc = ReasoningGraphConstructor(embedding_dim=self.embedding_dim)
+            for i, step in enumerate(steps):
+                embedding = self._embed(step["step"], step)
+                deps = list(range(max(0, i - 2), i))  # depend on previous 1-2 steps
+                gc.add_step(
+                    step_text=step["step"],
+                    embedding=embedding,
+                    depends_on=[d + 1 for d in deps],  # 1-indexed
+                    step_type=step.get("type", "deduction"),
+                )
+
+            # 4. Analyze topology
+            if gc.num_steps >= 2:
+                snapshot = gc.get_snapshot()
+                report = self._analyzer.analyze(snapshot)
+                health_reports.append(report)
+                action = decide_action(report)
+
+                # 5. If unhealthy and retries left, intervene
+                if action == Action.INTERVENE and attempt < max_retries:
+                    intervention_text = generate_intervention(report)
+                    if intervention_text:
+                        interventions.append(intervention_text)
+                        intervention = intervention_text
+                        continue  # retry with intervention
+            break  # healthy or out of retries
+
+        # 6. Extract answer
+        answer = self._extract_cot_answer(cot_text)
+        if not answer:
+            answer = self._force_final_answer(problem, steps) or ""
+
+        return {
+            "answer": answer,
+            "cot_text": cot_text,
+            "steps": steps,
+            "health_reports": health_reports,
+            "interventions": interventions,
+            "graph": gc.get_snapshot() if gc.num_steps > 0 else None,
+            "problem_type": "SEQUENTIAL",
+            "attempts": attempt + 1,
+        }
+
+    def _generate_cot(self, problem: str, intervention: str | None = None) -> str:
+        """Generate free-form chain-of-thought reasoning."""
+        if self.use_mock:
+            return "Step 1: Identify values. Step 2: Compute 2+3=5. The answer is 5."
+
+        intervention_note = ""
+        if intervention:
+            intervention_note = f"\n\nNote: {intervention}\n"
+
+        prompt = (
+            f"Solve this problem step by step. Show your work, "
+            f"then give the final answer as '#### <number>'.\n\n"
+            f"{problem}{intervention_note}\n\n"
+            f"Let me think step by step:"
+        )
+        return self._generate_text(prompt)
+
+    def _parse_cot_to_steps(self, cot_text: str) -> list[dict]:
+        """Parse free-form CoT text into a list of step dicts."""
+        # Split on sentence boundaries, numbered steps, or newlines
+        lines = re.split(r'\n+|(?<=\.)\s+(?=[A-Z0-9])', cot_text.strip())
+        steps = []
+        for line in lines:
+            line = line.strip()
+            if len(line) < 5:  # skip tiny fragments
+                continue
+            # Detect step type
+            step_type = "deduction"
+            lower = line.lower()
+            if any(w in lower for w in ["therefore", "so the answer", "####", "final answer", "total"]):
+                step_type = "answer"
+            elif any(w in lower for w in ["given", "we know", "let"]):
+                step_type = "setup"
+            elif any(w in lower for w in ["calculate", "compute", "multiply", "add", "subtract", "divide"]):
+                step_type = "computation"
+
+            steps.append({"step": line, "type": step_type, "depends_on": []})
+        return steps if steps else [{"step": cot_text[:500], "type": "answer", "depends_on": []}]
+
+    @staticmethod
+    def _extract_cot_answer(cot_text: str) -> str:
+        """Extract numeric answer from free-form CoT (look for #### pattern)."""
+        # GSM8K convention: #### <number>
+        match = re.search(r'####\s*(.+?)(?:\s*$|\n)', cot_text)
+        if match:
+            return match.group(1).strip()
+        # "the answer is X"
+        match = re.search(r'(?:answer|result|total)\s*(?:is|=|:)\s*\$?([\d,]+\.?\d*)', cot_text, re.IGNORECASE)
+        if match:
+            return match.group(1).replace(",", "")
+        return ""
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
