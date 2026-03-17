@@ -201,9 +201,9 @@ def main():
             result["gradient"] = report.gradient_energy
             result["harmonic"] = report.harmonic_energy
             result["spectral_gap"] = report.spectral_gap
-            result["components"] = report.num_components
+            result["connected_components"] = report.connected_components
             result["betti_1"] = report.betti_1
-            result["density"] = report.graph_density
+            result["density"] = report.density
             result["action"] = report.action.value if hasattr(report.action, 'value') else str(report.action)
 
             bucket = correct_topology if is_correct else wrong_topology
@@ -211,7 +211,7 @@ def main():
             bucket["gradient"].append(report.gradient_energy)
             bucket["harmonic"].append(report.harmonic_energy)
             bucket["spectral_gap"].append(report.spectral_gap)
-            bucket["components"].append(report.num_components)
+            bucket["connected_components"].append(report.connected_components)
             bucket["betti_1"].append(report.betti_1)
 
         results.append(result)
@@ -232,7 +232,7 @@ def main():
     print(f"{'Feature':<18} {'Correct (mean±std)':<22} {'Wrong (mean±std)':<22} {'Delta':>8}")
     print("-" * 72)
 
-    for feat in ["curl", "gradient", "harmonic", "spectral_gap", "components", "betti_1"]:
+    for feat in ["curl", "gradient", "harmonic", "spectral_gap", "connected_components", "betti_1"]:
         c_vals = correct_topology[feat]
         w_vals = wrong_topology[feat]
         if not c_vals or not w_vals:
@@ -283,7 +283,7 @@ def main():
                     "correct_mean": sum(correct_topology[feat]) / max(len(correct_topology[feat]), 1),
                     "wrong_mean": sum(wrong_topology[feat]) / max(len(wrong_topology[feat]), 1),
                 }
-                for feat in ["curl", "gradient", "harmonic", "spectral_gap", "components", "betti_1"]
+                for feat in ["curl", "gradient", "harmonic", "spectral_gap", "connected_components", "betti_1"]
             },
             "intervention_targeting": {
                 "intervene_correct": intervene_correct,
