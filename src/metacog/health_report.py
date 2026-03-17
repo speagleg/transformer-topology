@@ -7,6 +7,8 @@ from enum import Enum
 class Action(Enum):
     CONTINUE = "CONTINUE"
     INTERVENE = "INTERVENE"
+    BACKTRACK = "BACKTRACK"
+    STOP = "STOP"
 
 
 @dataclass
@@ -33,6 +35,11 @@ class ReasoningHealthReport:
     density: float
     num_nodes: int
     num_edges: int
+
+    @property
+    def action(self) -> str:
+        """String action derived from current metrics (for downstream consumers)."""
+        return decide_action(self).value
 
 
 def decide_action(report: ReasoningHealthReport) -> Action:
