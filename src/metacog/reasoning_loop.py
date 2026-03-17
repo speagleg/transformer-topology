@@ -321,9 +321,9 @@ class MetacognitiveReasoner:
             intervention_note = f"\n\nNote: {intervention}\n"
 
         prompt = (
-            f"Solve this problem step by step. Show your work, "
-            f"then give the final answer as '#### <number>'.\n\n"
-            f"{problem}{intervention_note}\n\n"
+            f"Solve this math problem step by step. Show your work clearly.\n"
+            f"At the end, write your final answer on a line starting with \"#### \".\n\n"
+            f"Problem: {problem}{intervention_note}\n\n"
             f"Let me think step by step:"
         )
         return self._generate_text(prompt)
@@ -412,7 +412,7 @@ class MetacognitiveReasoner:
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=256,
+                max_new_tokens=512,
                 do_sample=False,
                 pad_token_id=self.tokenizer.eos_token_id,
             )
