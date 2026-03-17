@@ -243,7 +243,8 @@ class MetacognitiveReasoner:
             "problem_type": problem_type,
         }
 
-    def solve_hybrid(self, problem: str, max_retries: int = 2) -> dict:
+    def solve_hybrid(self, problem: str, max_retries: int = 2,
+                      intervene: bool = True) -> dict:
         """Hybrid mode: free-form CoT first, topology monitoring post-hoc.
 
         1. Generate full CoT reasoning in one pass (free-form, no JSON)
@@ -285,8 +286,8 @@ class MetacognitiveReasoner:
                 health_reports.append(report)
                 action = decide_action(report)
 
-                # 5. If unhealthy and retries left, intervene
-                if action == Action.INTERVENE and attempt < max_retries:
+                # 5. If unhealthy and retries left, intervene (if enabled)
+                if action == Action.INTERVENE and attempt < max_retries and intervene:
                     intervention_text = generate_intervention(report)
                     if intervention_text:
                         interventions.append(intervention_text)

@@ -212,7 +212,8 @@ def eval_metacog(model, tokenizer, problem: str, embedding_dim: int = 128) -> di
     )
 
     t0 = time.time()
-    result = reasoner.solve_hybrid(problem)
+    intervene = not getattr(eval_metacog, '_no_intervene', False)
+    result = reasoner.solve_hybrid(problem, intervene=intervene)
     elapsed = time.time() - t0
 
     # Extract numeric answer from the answer string
@@ -345,7 +346,14 @@ def main():
         "--output", type=str, default="data/v12_gsm8k_results.json",
         help="Output path for results JSON.",
     )
+    parser.add_argument(
+        "--no-intervene", action="store_true",
+        help="Disable topology interventions (monitor only, no re-prompting).",
+    )
     args = parser.parse_args()
+
+    # Pass no-intervene flag to eval_metacog via function attribute
+    eval_metacog._no_intervene = args.no_intervene
 
     # Load dataset
     try:
