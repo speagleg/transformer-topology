@@ -50,7 +50,11 @@ class ReasoningGraphConstructor:
         # Convert 1-indexed depends_on to 0-indexed, filter invalid
         dep_indices = []
         for d in depends_on:
-            zero_idx = d - 1
+            try:
+                d_int = int(d)
+            except (TypeError, ValueError):
+                continue
+            zero_idx = d_int - 1
             if 0 <= zero_idx < node_idx:  # must reference earlier step
                 dep_indices.append(zero_idx)
 
