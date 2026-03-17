@@ -218,7 +218,10 @@ def eval_metacog(model, tokenizer, problem: str, embedding_dim: int = 128) -> di
 
     # Extract numeric answer from the answer string
     predicted = _extract_numeric_answer(result["answer"])
-    # Also check all steps for a numeric answer if top-level failed
+    # Try full CoT text if answer extraction failed
+    if predicted is None and "cot_text" in result:
+        predicted = _extract_numeric_answer(result["cot_text"])
+    # Also check all steps for a numeric answer if still failed
     if predicted is None:
         for step in reversed(result["steps"]):
             candidate = _extract_numeric_answer(step.get("step", ""))
