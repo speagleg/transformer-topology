@@ -381,13 +381,32 @@ The architecture (plan → execute → monitor → intervene) is built and funct
 - **Smarter interventions:** Currently template-based NL corrections. Could use topology signals to restructure the reasoning graph itself rather than just prompting "try again"
 - **Larger model or fine-tuning:** 3B models struggle with structured output + reasoning simultaneously. A 7B+ model or fine-tuning on structured reasoning might unlock the structured approach
 
-### Status (paused for direction)
+### ProntoQA Diagnostic: Does Topology Predict Reasoning Failures?
+
+200 problems, 71.5% accuracy. Built reasoning graph from each CoT, computed topology features, correlated with correct/wrong.
+
+**Topology signals show NO correlation with reasoning correctness:**
+
+| Feature | Correct | Wrong | Delta |
+|---------|---------|-------|-------|
+| curl | 0.100 | 0.098 | -0.002 |
+| gradient | 0.900 | 0.902 | +0.002 |
+| spectral_gap | 0.066 | 0.061 | -0.005 |
+| betti_1 | 28.7 | 31.4 | +2.6 |
+
+All 200 problems flagged as INTERVENE (betti_1 threshold too low). Precision 28.5% = base error rate. **Topology cannot distinguish correct from incorrect reasoning on this task.**
+
+**Root cause:** Post-hoc CoT graphs are structurally uniform. Every CoT is a linear chain of sentences with similar embeddings. Correct and incorrect chains look topologically identical. The failures are semantic (wrong logical inference), not structural (wrong reasoning pattern).
+
+**For topology to be diagnostic, the graph structure itself must differ between good and bad reasoning** — the model would need to actually go in circles, disconnect arguments, or create structural contradictions. On these benchmarks with a 3B model, the CoT is always a clean linear chain regardless of correctness.
+
+### Status
 - [x] v12 core implementation (9 modules, 46 tests)
 - [x] Phase 0 validation: PASS (97.9% JSON, 95.1% depends_on)
 - [x] GSM8K eval: structured 56%, hybrid 78%, CoT baseline 81%
 - [x] Hybrid mode: topology monitoring at zero cost
-- [ ] Finding a task where topology intervention helps
-- [ ] Smarter intervention strategies
+- [x] ProntoQA diagnostic: **topology signals show no correlation with correctness**
+- [ ] Project direction recalibration needed
 
 ---
 
