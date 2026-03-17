@@ -331,6 +331,66 @@ With balanced data at all sizes:
 
 Killed after 1 epoch to recalibrate project direction. The 1808s/epoch (4× baseline) reflects the cost of L1/L2 eigendecompositions. Curl at 36% on epoch 0 (vs baseline's 47% on epoch 0) — the L1/L2 paths were still randomly initialized. Inconclusive on whether L1 fixes OOD curl. Architecture is built and ready to resume.
 
+---
+
+## v12 — Topology-Guided Metacognitive Reasoning (March 16-17, 2026)
+
+**Design doc**: `docs/plans/2026-03-16-v12-metacognitive-reasoning-design.md`
+**Branch**: `master` (merged from v11)
+**Instance**: vast.ai RTX 4090 (port 40302, IP 136.63.28.112)
+
+### Vision
+
+GNN "conscious mind" plans reasoning structure, monitors via topological signal processing (Hodge decomposition, spectral gap, curl), and intervenes to correct LLM "subconscious" on multi-step reasoning.
+
+### Phase 0: Structured Output Validation — PASS
+
+Qwen 2.5-3B reliably produces structured JSON reasoning steps.
+
+| Metric | Result | Threshold |
+|--------|--------|-----------|
+| JSON parse rate | **97.9%** | 80% |
+| depends_on validity | **95.1%** | 60% |
+
+### GSM8K Evaluation Results
+
+| Mode | Accuracy | Avg Time | Notes |
+|------|----------|----------|-------|
+| Raw (no reasoning) | **6%** | ~1s | Baseline — nearly useless |
+| Structured metacog (JSON steps) | **56%** | 13.8s | JSON format degrades 3B reasoning |
+| Hybrid + interventions | **71%** | 10.6s | Topology interventions hurt (-1pt) |
+| **Hybrid no-intervene (matched)** | **78%** | 3.7s | Topology monitoring, no re-prompting |
+| **CoT baseline** | **81%** | 3.7s | Free-form reasoning, consistent |
+
+### Key Findings
+
+1. **Structured JSON output is a tax on small models.** Forcing Qwen 3B to output JSON at every step drops accuracy from 81% → 56%. The format constraint interferes with reasoning.
+
+2. **Hybrid mode recovers CoT quality.** Free-form CoT + post-hoc graph building → 78% at same speed as CoT. The topology analysis runs for free.
+
+3. **Interventions hurt, don't help on GSM8K.** Re-prompting based on topology signals drops accuracy by 1 point. The model either gets it right on the first pass or the intervention doesn't fix it.
+
+4. **The topology infrastructure works.** Phase 0 passed (97.9% parse rate). Health reports are generated. Interventions fire. The mechanism is sound — the problem is that GSM8K failures are arithmetic errors, not structural reasoning failures detectable by topology.
+
+5. **The 3-point gap (78% vs 81%) is prompt/extraction mismatch**, not topology overhead. Identical speed, near-identical accuracy.
+
+### What This Means for the Metacognition Vision
+
+The architecture (plan → execute → monitor → intervene) is built and functional. But the intervention mechanism needs:
+- **Better problem domain:** Tasks where reasoning structure matters more than arithmetic (logic puzzles, multi-hop QA, planning)
+- **Smarter interventions:** Currently template-based NL corrections. Could use topology signals to restructure the reasoning graph itself rather than just prompting "try again"
+- **Larger model or fine-tuning:** 3B models struggle with structured output + reasoning simultaneously. A 7B+ model or fine-tuning on structured reasoning might unlock the structured approach
+
+### Status (paused for direction)
+- [x] v12 core implementation (9 modules, 46 tests)
+- [x] Phase 0 validation: PASS (97.9% JSON, 95.1% depends_on)
+- [x] GSM8K eval: structured 56%, hybrid 78%, CoT baseline 81%
+- [x] Hybrid mode: topology monitoring at zero cost
+- [ ] Finding a task where topology intervention helps
+- [ ] Smarter intervention strategies
+
+---
+
 ### v11 Session Summary (March 14-16, 2026)
 
 **What worked:**
