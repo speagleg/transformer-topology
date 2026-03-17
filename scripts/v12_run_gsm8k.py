@@ -203,7 +203,7 @@ def eval_metacog(model, tokenizer, problem: str, embedding_dim: int = 128) -> di
 
     reasoner = MetacognitiveReasoner(
         embedding_dim=embedding_dim,
-        max_steps=12,
+        max_steps=8,
         use_mock=False,
         model=model,
         tokenizer=tokenizer,

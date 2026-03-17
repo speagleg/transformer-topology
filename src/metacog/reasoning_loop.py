@@ -223,7 +223,15 @@ class MetacognitiveReasoner:
             if step_type == "answer":
                 break
 
-        # 4. Assemble answer
+        # 4. Force a final answer if none was produced
+        has_answer_step = any(s.get("type") == "answer" for s in steps)
+        if not has_answer_step and steps and not self.use_mock:
+            final_answer = self._force_final_answer(problem, steps)
+            if final_answer:
+                steps.append({"step": final_answer, "type": "answer",
+                              "depends_on": [], "confidence": 0.9})
+
+        # 5. Assemble answer
         answer = self._extract_answer(steps)
 
         return {
@@ -316,6 +324,25 @@ class MetacognitiveReasoner:
             pad = torch.zeros(self.embedding_dim - hidden.shape[0], device=hidden.device)
             hidden = torch.cat([hidden, pad])
         return hidden.float().cpu()
+
+    @staticmethod
+    def _force_final_answer(self, problem: str, steps: list[dict]) -> str | None:
+        """Force the LLM to produce a final numeric answer from its work."""
+        steps_text = "\n".join(
+            f"Step {i+1}: {s.get('step', '')}" for i, s in enumerate(steps)
+        )
+        prompt = (
+            f"You solved this problem step by step:\n\n"
+            f"Problem: {problem}\n\n"
+            f"Your work:\n{steps_text}\n\n"
+            f"Based on your work above, what is the final numeric answer? "
+            f"Respond with ONLY the number, nothing else."
+        )
+        try:
+            response = self._generate_text(prompt)
+            return response.strip() if response else None
+        except Exception:
+            return None
 
     @staticmethod
     def _extract_answer(steps: list[dict]) -> str:
