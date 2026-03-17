@@ -325,7 +325,6 @@ class MetacognitiveReasoner:
             hidden = torch.cat([hidden, pad])
         return hidden.float().cpu()
 
-    @staticmethod
     def _force_final_answer(self, problem: str, steps: list[dict]) -> str | None:
         """Force the LLM to produce a final numeric answer from its work."""
         steps_text = "\n".join(
